@@ -1,0 +1,16 @@
+{
+  "devices": [
+    {
+      "device_id": "garage-controller",
+      "config": "devices/garage-controller.json",
+      "location": "Garage",
+      "notes": "Garage door + lights + weather + freezer"
+    },
+    {
+      "device_id": "house-monitor",
+      "config": "devices/house-monitor/device.json",
+      "location": "Kitchen Freezer",
+      "notes": "DS18B20 + door reed"
+    }
+  ]
+}
