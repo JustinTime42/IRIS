@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # MQTT Broker
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: iris-mqtt
+    restart: unless-stopped
+    ports:
+      - "1883:1883"  # MQTT
+      - "9001:9001"  # MQTT over WebSockets
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    command: /bin/sh -c "echo '${MQTT_USERNAME}:${MQTT_PASSWORD}' > /mosquitto/config/passwd && \
+      mosquitto_passwd -U /mosquitto/config/passwd && \
+      chmod 700 /mosquitto/config/passwd && \
+      chown root:root /mosquitto/config/passwd && \
+      /docker-entrypoint.sh /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
+    env_file:
+      - .env
+    environment:
+      - ALLOW_ANONYMOUS=false
+    networks:
+      - iris-network
+
+  # API Server
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: iris-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MQTT_BROKER_HOST=mqtt
+      - MQTT_BROKER_PORT=1883
+    depends_on:
+      - mqtt
+    networks:
+      - iris-network
+    volumes:
+      - ./api:/app/api
+      - ./logs:/app/logs
+
+  # Database (PostgreSQL)
+  db:
+    image: postgres:15-alpine
+    container_name: iris-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-iris}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - iris-network
+
+  # PGAdmin (Database Management)
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: iris-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    networks:
+      - iris-network
+
+networks:
+  iris-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
