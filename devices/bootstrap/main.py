@@ -43,6 +43,8 @@ def main():
         "wifi_password": "",
         "mqtt_host": "",
         "mqtt_port": 1883,
+        "mqtt_user": "",
+        "mqtt_password": "",
     }
     try:
         if load_device_config:
@@ -59,6 +61,8 @@ def main():
         wifi_password=str(cfg.get("wifi_password") or ""),
         mqtt_host=str(cfg.get("mqtt_host") or ""),
         mqtt_port=int(cfg.get("mqtt_port") or 1883),
+        mqtt_user=str(cfg.get("mqtt_user") or ""),
+        mqtt_password=str(cfg.get("mqtt_password") or ""),
     )
     bm.run_forever()
 

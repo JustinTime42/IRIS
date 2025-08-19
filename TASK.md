@@ -285,6 +285,10 @@ The LLM can automatically update and create tasks as needed.
   - [ ] Implement pressure reading
   - [ ] Create weather data reporting
 
+#### Progress Notes
+- [x] Ported BMP388 driver to Pico W compatible MicroPython (`shared/vendor/bmp3xx.py`), removed micro:bit deps, initialized I2C on GP6/GP7, replaced sleeps, and updated read/write calls (2025-08-19)
+- [ ] Verify on-device readings via deploy and import check; wire default I2C address 0x76 per SDO to GND (in progress)
+
 - [ ] Implement freezer monitoring
   - [ ] Configure DS18B20 sensor
   - [ ] Implement temperature reading
@@ -329,6 +333,8 @@ The LLM can automatically update and create tasks as needed.
 - [x] Harden deployment script mpremote interactions with reset + retries to mitigate "could not enter raw repl" errors (2025-08-15)
 - [x] Added scaffold for `devices/house-monitor/app/` with `main.py` and `sensors.py`; created `deployment/devices/house-monitor/README.md` to instruct creating local `device.json` (gitignored) (2025-08-15)
 - [x] Renamed project branding to IRIS (Intelligent Residence Information System); updated `design_doc.md` and `README.md` accordingly (2025-08-15)
+- [x] Deploy script: Added fallback to upload local `shared/vendor/bmp3xx.py` to device `/lib/` when `mip install bmp3xx` is unavailable (2025-08-18)
+- [x] BMP388 driver uses I2C address 0x76 by default since SDO is tied to GND; Pico W I2C bus 1 on GP6 (SDA) / GP7 (SCL) at 400kHz (2025-08-19)
 
 ## Discovered Tasks & Notes
 - [ ] Consider adding backup power monitoring for critical devices
