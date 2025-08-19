@@ -29,6 +29,13 @@ BOOTSTRAP_DIR = REPO_ROOT / "devices" / "bootstrap"
 SHARED_DIR = REPO_ROOT / "shared"
 DEVICES_ROOT = REPO_ROOT / "devices"
 
+# MicroPython packages that must be present on the device (installed via mip)
+REQUIRED_MIP_PACKAGES: list[str] = [
+    "umqtt.simple",
+    "onewire",
+    "ds18x20",
+]
+
 # Reason: Simple utility functions to keep the main flow easy to follow.
 
 def run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess:
@@ -162,6 +169,48 @@ def mpremote_fs_mkdir(port: str, path: str) -> None:
         time.sleep(0.5)
 
 
+def mpremote_mip_install(port: str, package: str, attempts: int = 2) -> None:
+    """
+    Install a MicroPython package on the device using mip.
+
+    Args:
+        port (str): Serial port (e.g., 'COM3').
+        package (str): Package spec understood by mip (e.g., 'umqtt.simple').
+        attempts (int): How many times to retry on transient failures.
+    """
+    cmd = [sys.executable, "-m", "mpremote", "connect", port, "mip", "install", package]
+    last_stdout = ""
+    last_stderr = ""
+    for i in range(max(1, attempts)):
+        p = run(cmd)
+        last_stdout, last_stderr = p.stdout, p.stderr
+        if p.returncode == 0:
+            print(f"Installed with mip: {package}")
+            return
+        time.sleep(0.8)
+    print(last_stdout)
+    print(last_stderr)
+    raise RuntimeError(f"mip install failed for package: {package}")
+
+
+def mpremote_eval_imports(port: str, modules: list[str]) -> None:
+    """
+    Verify that a list of modules can be imported on the device. Raises on failure.
+
+    Args:
+        port (str): Serial port (e.g., 'COM3').
+        modules (list[str]): Module names to import (e.g., 'umqtt.simple').
+    """
+    for mod in modules:
+        # Use exec so we can run import statements; eval only accepts expressions.
+        code = f"import {mod}\nprint('OK:{mod}')"
+        p = run([sys.executable, "-m", "mpremote", "connect", port, "exec", code])
+        if p.returncode != 0 or f"OK:{mod}" not in (p.stdout or ""):
+            print(p.stdout)
+            print(p.stderr)
+            raise RuntimeError(f"Device import failed for module: {mod}")
+
+
 def mpremote_reset(port: str) -> None:
     run([sys.executable, "-m", "mpremote", "connect", port, "reset"])
 
@@ -220,6 +269,13 @@ def main() -> None:
     print(f"Copy {SHARED_DIR} -> :/shared")
     mpremote_cp_r(port, SHARED_DIR, "/shared")
 
+    # Ensure vendor BMP3xx driver is placed in /lib as bmp3xx.py (per project requirement)
+    bmp_driver = SHARED_DIR / "vendor" / "bmp3xx.py"
+    ensure_file_exists(bmp_driver)  # required
+    mpremote_fs_mkdir(port, "/lib")
+    print(f"Copy {bmp_driver} -> :/lib/bmp3xx.py")
+    mpremote_cp(port, bmp_driver, "/lib/bmp3xx.py")
+
     # Copy app for this device if present
     # We expect devices/<device_id with -/_ variants>/app
     # Normalize possible naming differences
@@ -235,6 +291,14 @@ def main() -> None:
         mpremote_cp_r(port, app_dir, "/app")
     else:
         print("No device-specific app/ found. Leaving /app as-is.")
+
+    # Ensure required MicroPython packages are installed
+    if REQUIRED_MIP_PACKAGES:
+        print("Installing MicroPython packages via mip...")
+        for pkg in REQUIRED_MIP_PACKAGES:
+            mpremote_mip_install(port, pkg)
+        # Verify imports now to fail early if something's wrong
+        mpremote_eval_imports(port, REQUIRED_MIP_PACKAGES)
 
     # Merge and push config
     merged = merge_config(COMMON_NETWORK, device_cfg_path)

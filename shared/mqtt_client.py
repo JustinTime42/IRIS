@@ -14,7 +14,7 @@ except Exception:
 import ubinascii  # type: ignore
 import machine  # type: ignore
 import time
-from typing import Callable, Optional
+# Avoid importing typing at runtime on MicroPython; use comments instead.
 
 
 class Mqtt:
@@ -27,7 +27,7 @@ class Mqtt:
         on_message (Optional[Callable[[str, bytes], None]]): Callback for messages.
     """
 
-    def __init__(self, host: str, port: int = 1883, user: Optional[str] = None, password: Optional[str] = None, keepalive: int = 30):
+    def __init__(self, host, port=1883, user=None, password=None, keepalive=30, client_id=None):
         """
         Initialize MQTT client with safe defaults.
 
@@ -37,16 +37,25 @@ class Mqtt:
             user (Optional[str]): Username.
             password (Optional[str]): Password.
             keepalive (int): Keepalive seconds.
+            client_id (Optional[str]): Override for MQTT client id to avoid collisions.
         """
         self.client = None
-        self.client_id = ubinascii.hexlify(machine.unique_id()) if hasattr(machine, "unique_id") else b"pico"
+        # Allow overriding client id to avoid duplicate connections kicking each other off.
+        default_id = ubinascii.hexlify(machine.unique_id()) if hasattr(machine, "unique_id") else b"pico"
+        if client_id:
+            try:
+                self.client_id = client_id if isinstance(client_id, bytes) else client_id.encode()
+            except Exception:
+                self.client_id = default_id
+        else:
+            self.client_id = default_id
         self.host = host
         self.port = port
         self.user = user
         self.password = password
         self.keepalive = keepalive
-        self.on_message: Optional[Callable[[str, bytes], None]] = None
-        self._lwt: Optional[tuple[str, str, bool, int]] = None  # (topic, msg, retain, qos)
+        self.on_message = None  # type: ignore  # Callable[[str, bytes], None] | None
+        self._lwt = None  # type: ignore  # tuple[str, str, bool, int] | None
 
     def connect(self) -> bool:
         """
@@ -83,7 +92,7 @@ class Mqtt:
         finally:
             self.client = None
 
-    def subscribe(self, topic: str) -> bool:
+    def subscribe(self, topic):
         """
         Subscribe to a topic.
         """
@@ -95,7 +104,7 @@ class Mqtt:
         except Exception:
             return False
 
-    def publish(self, topic: str, msg: str | bytes, retain: bool = False, qos: int = 0) -> bool:
+    def publish(self, topic, msg, retain=False, qos=0):
         """
         Publish a message to a topic.
         """
@@ -109,7 +118,7 @@ class Mqtt:
         except Exception:
             return False
 
-    def check_msg(self) -> None:
+    def check_msg(self):
         """
         Non-blocking check for incoming messages.
         """
@@ -120,7 +129,7 @@ class Mqtt:
             # Allow caller to handle reconnect if desired
             pass
 
-    def wait_msg(self) -> None:
+    def wait_msg(self):
         """
         Blocking wait for a single message.
         """
@@ -130,7 +139,7 @@ class Mqtt:
         except Exception:
             pass
 
-    def set_message_handler(self, handler: Callable[[str, bytes], None]) -> None:
+    def set_message_handler(self, handler):
         """
         Set the message handler callback.
         """
@@ -141,7 +150,7 @@ class Mqtt:
             except Exception:
                 pass
 
-    def set_last_will(self, topic: str, msg: str, retain: bool = False, qos: int = 0) -> None:
+    def set_last_will(self, topic, msg, retain=False, qos=0):
         """
         Configure MQTT Last Will (LWT) published by broker if we disconnect ungracefully.
 
@@ -154,7 +163,7 @@ class Mqtt:
         self._lwt = (topic, msg, retain, qos)
 
     # ------------------------------------------------------------------
-    def _dispatch(self, topic: bytes, msg: bytes) -> None:
+    def _dispatch(self, topic, msg):
         try:
             if self.on_message:
                 self.on_message(topic.decode(), msg)

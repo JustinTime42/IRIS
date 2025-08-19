@@ -47,7 +47,7 @@ The system employs a hub-and-spoke MQTT architecture with the Linux server as th
 * **Primary Functions**:
   * Garage door control (relay) and position monitoring (dual reed switches)
   * Outdoor flood light control (relay)
-  * Weather station (BMP388 sensor for temperature, humidity, pressure)
+  * Weather station (BMP388 sensor for temperature, pressure)
   * Chest freezer temperature monitoring (single DS18B20)
 
 #### 3.1.3 Linux Server
