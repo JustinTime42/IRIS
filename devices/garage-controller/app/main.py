@@ -9,13 +9,23 @@ Controls and monitors:
 Entry point: main()
 """
 
-import time
-import machine
+try:
+    import time
+except Exception:
+    import sys as time  # type: ignore
+try:
+    import machine
+except Exception:
+    import sys as machine  # type: ignore
 import onewire
 import ds18x20
 from machine import Pin, I2C
 import bmp3xx  # Provided in shared/vendor and deployed to /lib
 from shared.config_manager import load_device_config
+try:
+    import ujson as json  # type: ignore
+except Exception:
+    import json  # type: ignore
 
 # Pin Definitions
 GARAGE_DOOR_RELAY = 2
@@ -37,11 +47,32 @@ TOPIC_WEATHER_PRESSURE = 'home/garage/weather/pressure'
 TOPIC_FREEZER_TEMP = 'home/garage/freezer/temperature'
 
 class GarageController:
-    """Main controller for garage door and related components."""
+    """Main controller for garage door and related components.
+
+    Attributes:
+        mqtt (shared.mqtt_client.Mqtt): MQTT client wrapper.
+        led (machine.Pin): Built-in LED pin for heartbeat.
+        door_relay (machine.Pin): Output to garage door relay.
+        light_relay (machine.Pin): Output to flood light relay.
+        door_open_sw (machine.Pin): Input from "door open" reed switch (active-low).
+        door_closed_sw (machine.Pin): Input from "door closed" reed switch (active-low).
+        bmp (bmp3xx.BMP3XX|None): BMP388 sensor instance if available.
+        ds_sensor (ds18x20.DS18X20|None): DS18B20 bus instance if available.
+        ds_roms (list): Discovered DS18B20 ROMs.
+        last_door_state (str): Last published door state.
+        last_light_state (bool): Last known flood light state.
+        last_update (int): ms timestamp for periodic sensor update.
+    """
     
-    def __init__(self, mqtt_client):
-        """Initialize hardware and MQTT client."""
+    def __init__(self, mqtt_client, device_id: str):
+        """Initialize hardware and MQTT client.
+
+        Args:
+            mqtt_client (shared.mqtt_client.Mqtt): Connected MQTT client wrapper.
+        """
         self.mqtt = mqtt_client
+        self.device_id = device_id
+        self._sos_topic = "home/system/{}/sos".format(self.device_id)
         self.led = Pin(LED_PIN, Pin.OUT)
         
         # Initialize relays
@@ -54,30 +85,65 @@ class GarageController:
         
         # Initialize BMP388 driver (uses I2C bus 1 with GP6/GP7 by default per PINOUT)
         # Reason: Our vendor driver internally initializes I2C for Pico W.
+        # Guards:
+        #  - If SDA/SCL are held low (miswire), I2C ops may hang. Check lines first.
+        #  - Only attempt init if an address 0x76/0x77 is detected on bus scan.
+        # Defer actual BMP driver instantiation to runtime to avoid boot-looping on sensor faults.
+        # We'll perform a quick diagnostic scan here, but not construct the driver yet.
         self.bmp = None
+        self._bmp_init_attempted = False
+        self._bmp_next_retry_ms = 0  # next allowed attempt time in ticks_ms
         try:
+            sda_ok = False
+            scl_ok = False
             try:
-                self.bmp = bmp3xx.BMP388()
+                sda_ok = bool(Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value())
+                scl_ok = bool(Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value())
             except Exception:
-                # Fallback to base class if specific not available
-                self.bmp = bmp3xx.BMP3XX()
-        except Exception as e:
-            # Sensor not present or I2C error; continue without BMP388
-            self.bmp = None
+                pass
+
+            # Perform a quick scan for diagnostic logging (even if lines look low)
+            addrs = []
+            try:
+                _di = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
+                time.sleep_ms(10)
+                addrs = _di.scan()
+            except Exception:
+                addrs = []
+            try:
+                print("[DIAG][I2C] SDA={} SCL={} scan={}".format(int(sda_ok), int(scl_ok), [hex(a) for a in addrs]))
+            except Exception:
+                pass
+            # Schedule a first init attempt shortly after boot to let system settle
+            try:
+                self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
+            except Exception:
+                self._bmp_next_retry_ms = 0
+        except Exception:
+            # Ignore diagnostics errors
+            pass
         
         # Initialize DS18B20
         self.ds_pin = Pin(DS18B20_PIN)
         try:
             self.ds_sensor = ds18x20.DS18X20(onewire.OneWire(self.ds_pin))
             self.ds_roms = self.ds_sensor.scan()
-        except Exception:
+        except Exception as e:
             self.ds_sensor = None
             self.ds_roms = []
+            try:
+                self.sos("ds18b20_init_failed", "{}".format(e))
+            except Exception:
+                pass
         
         # State tracking
-        self.last_door_state = self.get_door_state()
+        self._expected = None  # type: ignore  # "open"|"closed"|None, to better infer opening/closing
+        # Initialize to a safe placeholder before first read to avoid attribute access during inference
+        self.last_door_state = 'unknown'
         self.last_light_state = False
         self.last_update = 0
+        # Now compute the true initial state
+        self.last_door_state = self.get_door_state()
         
         # Setup MQTT callbacks
         # Reason: shared.mqtt_client.Mqtt exposes set_message_handler()
@@ -90,36 +156,80 @@ class GarageController:
             self.mqtt.subscribe(TOPIC_LIGHT_COMMAND)
         except Exception:
             pass
+        # Publish initial states so subscribers have baseline
+        try:
+            self.mqtt.publish(TOPIC_DOOR_STATUS, self.last_door_state)
+            self.mqtt.publish(TOPIC_LIGHT_STATUS, 'on' if self.last_light_state else 'off')
+        except Exception:
+            pass
     
     def get_door_state(self):
-        """Read door state from sensors."""
+        """Determine current garage door state based on reed switches.
+
+        Returns:
+            str: One of "open", "closed", "opening", "closing", or "error".
+        """
         open_sw = not self.door_open_sw.value()  # Active low
         closed_sw = not self.door_closed_sw.value()  # Active low
-        
+
+        # Both active is invalid
+        if open_sw and closed_sw:
+            return 'error'
+
+        # End states
         if open_sw and not closed_sw:
             return 'open'
-        elif not open_sw and closed_sw:
+        if closed_sw and not open_sw:
             return 'closed'
-        elif not open_sw and not closed_sw:
-            return 'in_between'  # Transitioning
-        else:
-            return 'error'  # Invalid state (both switches active)
+
+        # Transition: neither switch active
+        # Infer direction from last known or expected target
+        expected = getattr(self, "_expected", None)
+        last = getattr(self, "last_door_state", None)
+        if expected == 'open' or last == 'closed':
+            return 'opening'
+        if expected == 'closed' or last == 'open':
+            return 'closing'
+        # Fallback if unknown
+        if last in ('opening', 'open'):
+            return 'opening'
+        if last in ('closing', 'closed'):
+            return 'closing'
+        return 'closing'
     
     def toggle_garage_door(self):
-        """Toggle garage door state."""
+        """Momentarily activate the door relay to simulate a wall-button press.
+
+        Returns:
+            None: Relay is pulsed for 500ms.
+        """
         self.door_relay.value(1)
         time.sleep(0.5)  # Pulse relay for 500ms
         self.door_relay.value(0)
     
     def set_light(self, state):
-        """Set flood light state."""
+        """Set flood light state and publish status.
+
+        Args:
+            state (bool): True to turn on, False to turn off.
+        """
         self.light_relay.value(1 if state else 0)
         self.last_light_state = state
         self.mqtt.publish(TOPIC_LIGHT_STATUS, 'on' if state else 'off')
     
     def read_bmp388(self):
-        """Read temperature and pressure from BMP388."""
+        """Read temperature and pressure from BMP388.
+
+        Returns:
+            tuple[float|None, float|None]: (temp_f, pressure_inhg) or (None, None) on error.
+        """
         try:
+            if not self.bmp:
+                # Attempt lazy init if due
+                try:
+                    self._maybe_init_bmp()
+                except Exception:
+                    pass
             if not self.bmp:
                 return None, None
             # Vendor driver exposes Reading -> (temp_C, pressure_units)
@@ -129,11 +239,22 @@ class GarageController:
             pressure_inhg = pressure * 0.02953  # If pressure is in hPa, this yields inHg.
             return temp_c * 1.8 + 32, pressure_inhg
         except Exception as e:
-            print(f"BMP388 read error: {e}")
+            try:
+                print(f"BMP388 read error: {e}")
+            except Exception:
+                pass
+            try:
+                self.sos("bmp388_read_error", f"{e}")
+            except Exception:
+                pass
             return None, None
     
     def read_ds18b20(self):
-        """Read temperature from DS18B20."""
+        """Read temperature from DS18B20.
+
+        Returns:
+            float|None: Temperature in Fahrenheit, or None on error.
+        """
         try:
             if not self.ds_sensor:
                 return None
@@ -143,14 +264,47 @@ class GarageController:
                 temp_c = self.ds_sensor.read_temp(self.ds_roms[0])
                 return temp_c * 1.8 + 32  # Convert to °F
         except Exception as e:
-            print(f"DS18B20 read error: {e}")
+            try:
+                print(f"DS18B20 read error: {e}")
+            except Exception:
+                pass
+            try:
+                self.sos("ds18b20_read_error", f"{e}")
+            except Exception:
+                pass
         return None
+
+    def sos(self, error: str, message: str = "") -> None:
+        """Publish an SOS diagnostic event without raising.
+
+        Args:
+            error (str): Error code, e.g., 'bmp388_init_failed'.
+            message (str): Optional human-readable details.
+
+        Returns:
+            None
+        """
+        try:
+            payload = {
+                "device_id": self.device_id,
+                "error": error,
+                "message": message,
+                "timestamp": time.ticks_ms(),
+            }
+            try:
+                body = json.dumps(payload)
+            except Exception:
+                body = str(payload)
+            self.mqtt.publish(self._sos_topic, body)
+        except Exception:
+            # Never raise from SOS
+            pass
     
     def mqtt_callback(self, topic, msg):
         """Handle incoming MQTT messages.
 
         Args:
-            topic (str): Topic string (already decoded by shared.mqtt_client).
+            topic (str): Topic string (already decoded by `shared.mqtt_client`).
             msg (bytes|str): Payload; may be bytes from umqtt.
         """
         # Ensure payload is str for comparisons
@@ -167,6 +321,14 @@ class GarageController:
             pass
 
         if topic == TOPIC_DOOR_COMMAND and msg in ['open', 'close', 'toggle']:
+            # Always pulse the relay for open/close/toggle to match wall-button behavior
+            # while still recording intent to help state inference.
+            if msg == 'open':
+                self._expected = 'open'
+            elif msg == 'close':
+                self._expected = 'closed'
+            else:
+                self._expected = None
             self.toggle_garage_door()
         elif topic == TOPIC_LIGHT_COMMAND:
             if msg == 'on':
@@ -177,15 +339,29 @@ class GarageController:
                 self.set_light(not self.last_light_state)
     
     def update_sensors(self):
-        """Read all sensors and publish updates."""
+        """Read all sensors and publish updates.
+
+        Publishes:
+            - `home/garage/door/status`: on any door state change.
+            - `home/garage/weather/*`: temperature (F) and pressure (inHg) every 30s.
+            - `home/garage/freezer/temperature`: (F) every 30s.
+        """
         current_time = time.ticks_ms()
+        # Try initializing BMP driver if scheduled
+        try:
+            self._maybe_init_bmp()
+        except Exception:
+            pass
         
         # Update door state if changed
         door_state = self.get_door_state()
         if door_state != self.last_door_state:
             self.mqtt.publish(TOPIC_DOOR_STATUS, door_state)
             self.last_door_state = door_state
-        
+            # Clear expected target once we hit terminal state
+            if door_state in ('open', 'closed'):
+                self._expected = None
+
         # Update sensors every 30 seconds
         if time.ticks_diff(current_time, self.last_update) > 30000:
             # Read and publish weather data
@@ -206,8 +382,120 @@ class GarageController:
             except Exception:
                 pass
 
+    def _maybe_init_bmp(self):
+        """Attempt to initialize BMP388 driver with backoff and diagnostics.
+
+        This method is safe to call frequently; it only attempts init when due
+        and when basic I2C line checks and device presence look sane.
+
+        Returns:
+            None
+        """
+        try:
+            if self.bmp is not None:
+                return
+            now = time.ticks_ms()
+            # Respect backoff schedule
+            try:
+                if self._bmp_init_attempted and time.ticks_diff(now, self._bmp_next_retry_ms) < 0:
+                    return
+            except Exception:
+                # If ticks functions not available, proceed cautiously once
+                pass
+
+            # Basic line state check
+            try:
+                sda_ok = bool(Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value())
+                scl_ok = bool(Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value())
+            except Exception:
+                sda_ok = True
+                scl_ok = True
+
+            # Scan for device
+            addrs = []
+            try:
+                _di = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
+                time.sleep_ms(5)
+                addrs = _di.scan()
+            except Exception:
+                addrs = []
+
+            if not (sda_ok and scl_ok):
+                try:
+                    print("[BMP][INIT] I2C lines not idle; deferring init. SDA={} SCL={}".format(int(sda_ok), int(scl_ok)))
+                except Exception:
+                    pass
+                self._schedule_bmp_retry(now, 15000)
+                return
+
+            if not (0x76 in addrs or 0x77 in addrs):
+                try:
+                    print("[BMP][INIT] No BMP3xx address on bus; deferring. scan=", [hex(a) for a in addrs])
+                except Exception:
+                    pass
+                self._schedule_bmp_retry(now, 30000)
+                return
+
+            # Optional: quick probe of chip-id register (0x00)
+            try:
+                addr = 0x76 if 0x76 in addrs else 0x77
+                _di.writeto(addr, b"\x00")
+                _id = _di.readfrom(addr, 1)[0]
+                try:
+                    print("[BMP][INIT] probe id=", "0x{:02x}".format(_id))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # Try construct driver
+            try:
+                self.bmp = bmp3xx.BMP388()
+                try:
+                    print("[BMP][INIT] driver ready")
+                except Exception:
+                    pass
+                return
+            except Exception as e1:
+                try:
+                    self.bmp = bmp3xx.BMP3XX()
+                    print("[BMP][INIT] fallback driver ready")
+                    return
+                except Exception as e2:
+                    self.bmp = None
+                    try:
+                        self.sos("bmp388_init_failed", "{} / {}".format(e1, e2))
+                    except Exception:
+                        pass
+                    self._schedule_bmp_retry(now, 60000)
+        finally:
+            self._bmp_init_attempted = True
+
+    def _schedule_bmp_retry(self, now_ms, delay_ms):
+        """Schedule the next BMP init attempt.
+
+        Args:
+            now_ms (int): Current ticks_ms time.
+            delay_ms (int): Delay before next attempt.
+
+        Returns:
+            None
+        """
+        try:
+            self._bmp_next_retry_ms = time.ticks_add(now_ms, delay_ms)
+        except Exception:
+            # If ticks_add not available, fall back to immediate retry later
+            self._bmp_next_retry_ms = 0
+
 def main():
-    """Main application loop."""
+    """Main application loop.
+
+    Loads MQTT configuration, connects, initializes `GarageController`, and
+    runs the main polling loop. Publishes a simple health heartbeat.
+
+    Returns:
+        None
+    """
     # Load MQTT config
     cfg = load_device_config()
     device_id = cfg.get("device_id") or "device-unknown"
@@ -230,7 +518,35 @@ def main():
         pass
 
     # Initialize controller
-    controller = GarageController(mqtt)
+    try:
+        try:
+            print("[APP] init controller...")
+        except Exception:
+            pass
+        controller = GarageController(mqtt, device_id)
+        try:
+            print("[APP] controller ready")
+        except Exception:
+            pass
+    except Exception as e:
+        # Surface the failure clearly and let bootstrap catch the exception
+        try:
+            print("[APP] controller init failed:", e)
+        except Exception:
+            pass
+        try:
+            # Minimal SOS without assuming mqtt wrapper shape
+            base = "home/system/{}/sos".format(device_id)
+            body = json.dumps({
+                "device_id": device_id,
+                "error": "controller_init_failed",
+                "message": str(e),
+                "timestamp": time.ticks_ms(),
+            })
+            mqtt.publish(base, body)
+        except Exception:
+            pass
+        raise
 
     print("Garage controller started")
 

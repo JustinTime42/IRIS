@@ -317,6 +317,13 @@ class BootstrapManager:
                 pass
             self._publish_status("running")
             app_main()
+            # If the application returns instead of running forever, treat as abnormal but non-crashing.
+            self._publish_sos("app_exited", "Application main() returned unexpectedly")
+            try:
+                # Avoid tight restart loop; small delay before next attempt
+                time.sleep_ms(500)
+            except Exception:
+                pass
         except Exception as exc:
             # Never crash the bootstrap; report and continue
             self._publish_sos("app_crash", str(exc))

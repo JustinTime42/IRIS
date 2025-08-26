@@ -12,6 +12,105 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
+"""
+Database imports: handle both package and direct execution contexts.
+"""
+try:
+    # When running with project root in PYTHONPATH
+    from server.database.init import init_db, db_health_check
+    from server.database.engine import get_session
+    from server.database.engine import AsyncSessionLocal
+    from server.database.repositories import (
+        upsert_device,
+        log_device_boot,
+        record_sensor_reading,
+        create_sos_incident,
+    )
+except Exception:
+    # Fallback when running from within server/ directory
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+    from database.init import init_db, db_health_check  # type: ignore
+    from database.engine import get_session  # type: ignore
+    from database.engine import AsyncSessionLocal  # type: ignore
+    from database.repositories import (  # type: ignore
+        upsert_device,
+        log_device_boot,
+        record_sensor_reading,
+        create_sos_incident,
+    )
+
+# Async utilities
+import asyncio
+
+# Global handle to the running event loop for scheduling DB work from MQTT thread
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+async def process_mqtt_event(topic: str, payload: str) -> None:
+    """Persist relevant MQTT events into the database.
+
+    Args:
+        topic (str): MQTT topic
+        payload (str): Decoded payload
+    """
+    try:
+        async with AsyncSessionLocal() as session:  # type: ignore
+            # System topics: home/system/{device_id}/{type}
+            if topic.startswith("home/system/"):
+                parts = topic.split('/')
+                if len(parts) >= 4:
+                    device_id = parts[2]
+                    msg_type = parts[3]
+
+                    if msg_type == 'health':
+                        await upsert_device(session, device_id=device_id, status=payload)
+                    elif msg_type == 'sos':
+                        details = json.loads(payload) if payload else {}
+                        await upsert_device(
+                            session,
+                            device_id=device_id,
+                            status=DeviceStatus.NEEDS_HELP.value,
+                            last_error=details.get('message') or details.get('error') or 'Unknown error',
+                        )
+                        await create_sos_incident(
+                            session,
+                            device_id=device_id,
+                            error_message=details.get('message') or details.get('error'),
+                            details=details,
+                        )
+                    elif msg_type == 'boot':
+                        try:
+                            boot_dt = datetime.utcfromtimestamp(int(payload) / 1000)
+                        except Exception:
+                            boot_dt = datetime.utcnow()
+                        await upsert_device(session, device_id=device_id, last_boot=boot_dt)
+                        await log_device_boot(session, device_id=device_id, boot_time=boot_dt)
+                    elif msg_type == 'version':
+                        await upsert_device(session, device_id=device_id, version=payload)
+
+            # Garage and other topics → record as sensor readings
+            elif topic == GARAGE_LIGHT_TOPIC:
+                await record_sensor_reading(session, device_id=None, metric='garage_light', value_text=payload)
+            elif topic == GARAGE_DOOR_STATUS_TOPIC:
+                await record_sensor_reading(session, device_id=None, metric='garage_door', value_text=payload)
+            elif topic == GARAGE_WEATHER_TEMPERATURE_TOPIC:
+                try:
+                    await record_sensor_reading(session, device_id=None, metric='garage_temperature_f', value_float=float(payload))
+                except Exception:
+                    pass
+            elif topic == GARAGE_WEATHER_PRESSURE_TOPIC:
+                try:
+                    await record_sensor_reading(session, device_id=None, metric='garage_pressure_inhg', value_float=float(payload))
+                except Exception:
+                    pass
+            elif topic == GARAGE_FREEZER_TEMPERATURE_TOPIC:
+                try:
+                    await record_sensor_reading(session, device_id=None, metric='freezer_temperature_f', value_float=float(payload))
+                except Exception:
+                    pass
+    except Exception as ex:
+        logger.error(f"process_mqtt_event failed for topic={topic}: {ex}")
 
 # Load environment variables
 load_dotenv()
@@ -66,6 +165,11 @@ def update_device_status(device_id: str, **updates) -> DeviceInfo:
 # MQTT Topics (matching Pico W implementation)
 GARAGE_LIGHT_TOPIC = 'home/garage/light/status'  # From Pico W to server
 GARAGE_LIGHT_COMMAND_TOPIC = 'home/garage/light/command'  # From server to Pico W
+GARAGE_DOOR_STATUS_TOPIC = 'home/garage/door/status'
+GARAGE_DOOR_COMMAND_TOPIC = 'home/garage/door/command'  # From server to Pico W
+GARAGE_WEATHER_TEMPERATURE_TOPIC = 'home/garage/weather/temperature'
+GARAGE_WEATHER_PRESSURE_TOPIC = 'home/garage/weather/pressure'
+GARAGE_FREEZER_TEMPERATURE_TOPIC = 'home/garage/freezer/temperature'
 
 # Garage Light State (simplified to match Pico W's string format)
 class LightState(BaseModel):
@@ -74,6 +178,27 @@ class LightState(BaseModel):
 
 # In-memory storage for light state (in production, use a database)
 garage_light_state = LightState(state="off")
+
+# Additional in-memory sensor caches
+class WeatherState(BaseModel):
+    temperature_f: Optional[float] = None
+    pressure_inhg: Optional[float] = None
+    last_updated: Optional[datetime] = None
+
+
+class FreezerState(BaseModel):
+    temperature_f: Optional[float] = None
+    last_updated: Optional[datetime] = None
+
+
+class DoorState(BaseModel):
+    state: Optional[str] = None  # 'open' | 'closed' | 'opening' | 'closing' | 'error'
+    last_updated: Optional[datetime] = None
+
+
+weather_state = WeatherState()
+freezer_state = FreezerState()
+door_state = DoorState()
 
 def update_light_state(new_state: Dict[str, Any]):
     """Update the in-memory light state."""
@@ -91,7 +216,16 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         # Subscribe to system and garage topics
         client.subscribe("home/system/+/#")  # All system topics for all devices
         client.subscribe(GARAGE_LIGHT_TOPIC)
-        logger.info(f"Subscribed to MQTT topics: home/system/+/#, {GARAGE_LIGHT_TOPIC}")
+        client.subscribe(GARAGE_DOOR_STATUS_TOPIC)
+        client.subscribe("home/garage/weather/#")
+        client.subscribe("home/garage/freezer/#")
+        logger.info(
+            "Subscribed to MQTT topics: home/system/+/#, %s, %s, %s, %s",
+            GARAGE_LIGHT_TOPIC,
+            GARAGE_DOOR_STATUS_TOPIC,
+            "home/garage/weather/#",
+            "home/garage/freezer/#",
+        )
     else:
         logger.error(f"Failed to connect to MQTT Broker with code: {reason_code}")
 
@@ -129,12 +263,46 @@ def on_message(client, userdata, msg):
         # Handle garage light state
         elif topic == GARAGE_LIGHT_TOPIC:
             update_light_state(payload)
+        # Handle door status
+        elif topic == GARAGE_DOOR_STATUS_TOPIC:
+            try:
+                door_state.state = payload
+                door_state.last_updated = datetime.utcnow()
+            except Exception:
+                pass
+        # Handle weather topics
+        elif topic == GARAGE_WEATHER_TEMPERATURE_TOPIC:
+            try:
+                weather_state.temperature_f = float(payload)
+                weather_state.last_updated = datetime.utcnow()
+            except Exception:
+                logger.warning(f"Invalid temperature payload: {payload}")
+        elif topic == GARAGE_WEATHER_PRESSURE_TOPIC:
+            try:
+                weather_state.pressure_inhg = float(payload)
+                weather_state.last_updated = datetime.utcnow()
+            except Exception:
+                logger.warning(f"Invalid pressure payload: {payload}")
+        # Handle freezer topic
+        elif topic == GARAGE_FREEZER_TEMPERATURE_TOPIC:
+            try:
+                freezer_state.temperature_f = float(payload)
+                freezer_state.last_updated = datetime.utcnow()
+            except Exception:
+                logger.warning(f"Invalid freezer temp payload: {payload}")
             
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse MQTT message: {payload}")
     except Exception as e:
         logger.error(f"Error processing MQTT message: {e}")
         logger.exception(e)
+    finally:
+        # Schedule DB persistence on the app's event loop
+        try:
+            if _event_loop is not None:
+                asyncio.run_coroutine_threadsafe(process_mqtt_event(topic, payload), _event_loop)
+        except Exception as ex:
+            logger.error(f"Failed to schedule DB task for topic {topic}: {ex}")
 
 # Application Lifespan
 @asynccontextmanager
@@ -162,6 +330,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start MQTT client: {e}")
         raise
+    
+    # Initialize database (create tables if not present)
+    try:
+        logger.info("Initializing database (creating tables if needed)...")
+        await init_db()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
+
+    # Capture event loop for cross-thread scheduling
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
     
     yield  # Application runs here
     
@@ -205,6 +386,17 @@ async def root():
         "redoc": "/redoc"
     }
 
+# Database health endpoint
+@app.get("/db/health")
+async def db_health():
+    """Simple database health check returning server version."""
+    try:
+        result = await db_health_check()
+        return {"status": "ok", **result}
+    except Exception as e:
+        logger.error(f"DB health check failed: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
 # Garage Light Endpoints
 @app.post("/api/garage/light/toggle", response_model=LightState)
 async def toggle_garage_light():
@@ -229,6 +421,50 @@ async def toggle_garage_light():
 async def get_garage_light_state():
     """Get the current garage light state."""
     return garage_light_state
+
+# New sensor endpoints
+@app.get("/api/garage/weather", response_model=WeatherState)
+async def get_garage_weather():
+    """Get latest weather readings from BMP388 (temperature °F and pressure inHg)."""
+    return weather_state
+
+
+@app.get("/api/garage/freezer", response_model=FreezerState)
+async def get_freezer_temperature():
+    """Get latest freezer temperature (°F)."""
+    return freezer_state
+
+
+@app.get("/api/garage/door/state", response_model=DoorState)
+async def get_garage_door_state():
+    """Get the current garage door state."""
+    return door_state
+
+@app.post("/api/garage/door/{command}")
+async def send_garage_door_command(command: str):
+    """Send a command to the garage door controller.
+
+    Args:
+        command (str): One of "open", "close", or "toggle".
+
+    Returns:
+        dict: Status response with echoed command.
+    """
+    cmd = (command or "").lower()
+    if cmd not in ("open", "close", "toggle"):
+        raise HTTPException(status_code=400, detail="Command must be 'open', 'close', or 'toggle'")
+
+    # Ensure MQTT client is connected
+    if not hasattr(app.state, 'mqtt_client') or not app.state.mqtt_client.is_connected():
+        raise HTTPException(status_code=503, detail="MQTT client not connected")
+
+    try:
+        app.state.mqtt_client.publish(GARAGE_DOOR_COMMAND_TOPIC, cmd)
+        logger.info(f"Sent garage door command: {cmd}")
+        return {"status": "sent", "command": cmd}
+    except Exception as e:
+        logger.error(f"Error sending garage door command: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/garage/light/{state}", response_model=LightState)
 async def set_garage_light_state(state: str):

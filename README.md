@@ -109,6 +109,35 @@ python deployment/scripts/deploy.py
   - Confirm the correct port is selected (e.g., `COM5` on Windows).
   - The deploy script now auto-resets and retries transfers, but persistent failures usually indicate the port is busy or the cable/port is unstable.
 
+## Mobile App (Android / Expo)
+
+The React Native app lives in `android/app/`. See design at `android/APP_DESIGN.md`.
+
+### Prereqs
+- Node 18+
+- Expo CLI (optional): `npm i -g expo-cli`
+- Android Emulator or Expo Go on device
+- Server running locally at `http://localhost:8000` (configurable in `android/app/src/shared/config.ts`)
+
+### First-time setup
+```powershell
+cd android/app
+npm install
+```
+
+### Run
+```powershell
+npm run web      # quick web preview
+npm run android  # open Android emulator or use Expo Go
+```
+
+### Notes
+- Theme tokens are in `android/app/src/shared/theme.ts`.
+- Navigation is in `android/app/src/navigation/RootNavigator.tsx`.
+- API client: `android/app/src/services/api.ts` (maps to `server/api/main.py`).
+- React Query hooks: `android/app/src/hooks/useGarage.ts`.
+- Adjust backend base URL in `android/app/src/shared/config.ts`.
+
 ## Security Notes
 
 - `deployment/devices/**/device.json` is gitignored to avoid committing secrets.

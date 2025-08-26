@@ -54,11 +54,13 @@
   - GP3 to switch
   - Switch to GND
   - Internal pull-up enabled
+  - blue = common to gnd, white to gpio, black unused 
 
 - **Door Closed**:
   - GP4 to switch
   - Switch to GND
   - Internal pull-up enabled
+  - blue = common to gnd, white to gpio, black unused 
 
 ## Notes
 - All GPIOs are 3.3V logic level

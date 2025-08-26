@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "author": "IRIS - Garage Controller",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-pi-pico", "id": "pico", "top": 0, "left": 0, "attrs": {} },
+
+    { "type": "wokwi-bme280", "id": "bmp", "top": 20, "left": 260, "attrs": {} },
+
+    { "type": "wokwi-ds18b20", "id": "ds", "top": 150, "left": 260, "attrs": {} },
+    { "type": "wokwi-resistor", "id": "r_pullup", "top": 130, "left": 260, "rotate": 90, "attrs": { "value": "4.7k" } },
+
+    { "type": "wokwi-switch", "id": "reed_open", "top": 220, "left": 220, "attrs": { "label": "Door Open Reed" } },
+    { "type": "wokwi-switch", "id": "reed_closed", "top": 280, "left": 220, "attrs": { "label": "Door Closed Reed" } },
+
+    { "type": "wokwi-relay-module", "id": "relay_door", "top": 20, "left": 360, "attrs": { "label": "Garage Door Relay" } },
+    { "type": "wokwi-relay-module", "id": "relay_light", "top": 100, "left": 360, "attrs": { "label": "Flood Light Relay" } }
+  ],
+  "connections": [
+    [ "pico:GP6", "bmp:SDA", "green" ],
+    [ "pico:GP7", "bmp:SCL", "yellow" ],
+    [ "pico:3V3", "bmp:VCC", "red" ],
+    [ "pico:GND", "bmp:GND", "black" ],
+    [ "pico:3V3", "bmp:CS", "red" ],
+    [ "pico:GND", "bmp:SDO", "black" ],
+    [ "pico:GP8", "ds:DQ", "green" ],
+    [ "pico:3V3", "ds:VDD", "red" ],
+    [ "pico:GND", "ds:GND", "black" ],
+    [ "pico:GP8", "r_pullup:1", "green" ],
+    [ "pico:3V3", "r_pullup:2", "red" ],
+    [ "pico:GP3", "reed_open:1", "blue" ],
+    [ "reed_open:2", "pico:GND", "black" ],
+    [ "pico:GP4", "reed_closed:1", "blue" ],
+    [ "reed_closed:2", "pico:GND", "black" ],
+    [ "pico:GP2", "relay_door:IN", "orange" ],
+    [ "pico:VBUS", "relay_door:VCC", "red" ],
+    [ "pico:GND", "relay_door:GND", "black" ],
+    [ "pico:GP5", "relay_light:IN", "orange" ],
+    [ "pico:VBUS", "relay_light:VCC", "red" ],
+    [ "pico:GND", "relay_light:GND", "black" ]
+  ],
+  "annotations": [
+    { "label": "BMP388 wired as I2C (address 0x76 via SDO→GND, CS→3V3)", "x": 330, "y": -40 },
+    { "label": "Relays powered from VBUS (USB 5V)", "x": 360, "y": 0 },
+    { "label": "Reed switches connect GPIO→GND (internal pull-ups enabled)", "x": -60, "y": 200 }
+  ]
+}

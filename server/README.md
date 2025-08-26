@@ -34,6 +34,7 @@ This is the central server for the IRIS (Intelligent Residence Information Syste
 - **API Server**: http://localhost:8000
   - API Documentation: http://localhost:8000/docs
   - Health Check: http://localhost:8000/health
+  - DB Health: http://localhost:8000/db/health
 
 - **MQTT Broker**:
   - Host: `localhost`
@@ -66,6 +67,11 @@ This is the central server for the IRIS (Intelligent Residence Information Syste
    ```bash
    uvicorn api.main:app --reload
    ```
+
+4. Database configuration (local/dev):
+   - The API reads Postgres config from env vars: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`.
+   - Alternatively, set `DATABASE_URL` (sync or async); sync URLs are auto-converted to async for SQLAlchemy.
+   - With Docker Compose, the API connects to the `db` service automatically.
 
 ## Project Structure
 

@@ -39,13 +39,20 @@ services:
     environment:
       - MQTT_BROKER_HOST=mqtt
       - MQTT_BROKER_PORT=1883
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-iris}
     depends_on:
       - mqtt
+      - db
     networks:
       - iris-network
     volumes:
       - ./api:/app/api
       - ./logs:/app/logs
+      - ./database:/app/database
 
   # Database (PostgreSQL)
   db:

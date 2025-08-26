@@ -1,3 +1,4 @@
 network.json
 .env
 venv/
+log/

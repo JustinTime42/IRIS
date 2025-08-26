@@ -108,10 +108,13 @@ The LLM can automatically update and create tasks as needed.
 
 #### Mobile App Development
 - [ ] Set up React Native project
-  - [ ] Initialize Expo project
+  - [x] Initialize Expo project
   - [ ] Configure React Native Paper
   - [ ] Set up project structure
   - [ ] Configure development environment
+
+- [x] Draft Android App Design Spec (2025-08-24)
+  - Created `android/APP_DESIGN.md` with visual guidelines, information architecture, and complete feature/user story list
 
 - [ ] Implement core mobile functionality
   - [ ] Create device status display
@@ -208,10 +211,10 @@ The LLM can automatically update and create tasks as needed.
 
 ### Database Setup
 - [ ] Set up PostgreSQL database
-  - [ ] Create database schema
-  - [ ] Implement time-series tables
-  - [ ] Set up SOS incident tracking
-  - [ ] Create device health tables
+  - [x] Create database schema (tables scaffolded in `server/database/models.py`) (2025-08-24)
+  - [x] Implement time-series tables (`SensorReading`) (2025-08-24)
+  - [x] Set up SOS incident tracking (`SOSIncident`) (2025-08-24)
+  - [x] Create device health tables (`Device`, `DeviceBoot`) (2025-08-24)
   - [ ] Configure backup and recovery
 
 ### API Development
@@ -221,6 +224,7 @@ The LLM can automatically update and create tasks as needed.
   - [ ] Add historical data access
   - [ ] Implement update management
   - [ ] Create SOS management endpoints
+  - [x] Add DB health endpoint (`GET /db/health`) (2025-08-24)
 
 - [ ] Implement WebSocket channels
   - [ ] Create real-time status updates
@@ -267,27 +271,32 @@ The LLM can automatically update and create tasks as needed.
   - [ ] Create door alert system
 
 ### Garage Controller
-- [ ] Implement garage door control
-  - [ ] Configure relay for door control
-  - [ ] Set up reed switches for position detection
-  - [ ] Implement open/close commands
-  - [ ] Add position status reporting
+- [x] Implement garage door control
+  - [x] Configure relay for door control
+  - [x] Set up reed switches for position detection
+  - [x] Implement open/close commands
+  - [x] Add position status reporting ("open", "closed", "opening", "closing")
 
-- [ ] Implement light control
-  - [ ] Configure relay for flood light
-  - [ ] Implement on/off commands
-  - [ ] Add status reporting
+- [x] Implement light control
+  - [x] Configure relay for flood light
+  - [x] Implement on/off commands
+  - [x] Add status reporting
 
-- [ ] Implement weather station
-  - [ ] Configure BMP388 sensor
-  - [ ] Implement temperature reading
+- [x] Implement weather station
+  - [x] Configure BMP388 sensor
+  - [x] Implement temperature reading
   - [ ] Add humidity measurement
-  - [ ] Implement pressure reading
-  - [ ] Create weather data reporting
+  - [x] Implement pressure reading
+  - [x] Create weather data reporting
 
 #### Progress Notes
 - [x] Ported BMP388 driver to Pico W compatible MicroPython (`shared/vendor/bmp3xx.py`), removed micro:bit deps, initialized I2C on GP6/GP7, replaced sleeps, and updated read/write calls (2025-08-19)
 - [ ] Verify on-device readings via deploy and import check; wire default I2C address 0x76 per SDO to GND (in progress)
+
+- [x] Garage Controller app layer: wired GPIOs for door relays/switches, floodlight relay, BMP388 over I2C, DS18B20 on GP8; publishes MQTT topics for all changes per design_doc (2025-08-20)
+- [x] Note: BMP388 does not provide humidity; only temperature and pressure are published on `home/garage/weather/temperature` and `home/garage/weather/pressure` (2025-08-20)
+
+- [x] Deferred BMP388 initialization with lazy backoff to prevent boot loops; added diagnostics and SOS on init/read, while keeping app stable (2025-08-23)
 
 - [ ] Implement freezer monitoring
   - [ ] Configure DS18B20 sensor
@@ -327,7 +336,30 @@ The LLM can automatically update and create tasks as needed.
 ---
 
 ## Completed Tasks
-- None yet
+- [x] Devices: Created Wokwi wiring diagram for Garage Controller (2025-08-23)
+  - Added `devices/garage-controller/diagram.json` describing full wiring:
+    - Pico W pins: GP2 (door relay), GP5 (light relay), GP3 (open reed), GP4 (closed reed), GP6/GP7 (I2C SDA/SCL), GP8 (DS18B20), 3V3, GND, VSYS
+    - BMP388 via I2C (represented with BMP280 part) at address 0x76
+    - DS18B20 with 4.7k pull-up from DQ to 3V3
+    - Two reed switches (GPIO→switch→GND, internal pull-ups in code)
+    - Two 5V relay modules powered from VSYS and controlled by GP2/GP5
+- [x] Server: Subscribe to garage MQTT topics and expose REST endpoints for live sensor data (2025-08-23)
+  - Subscribed to `home/garage/door/status`, `home/garage/weather/#`, `home/garage/freezer/#` in `server/api/main.py`
+  - Added in-memory caches and endpoints:
+    - `GET /api/garage/weather` → BMP388 temperature (°F) and pressure (inHg)
+    - `GET /api/garage/freezer` → freezer temperature (°F)
+    - `GET /api/garage/door/state` → door state
+
+- [x] Server: Garage door control API and MQTT publish (2025-08-23)
+  - Added `GARAGE_DOOR_COMMAND_TOPIC` = `home/garage/door/command`
+  - Implemented `POST /api/garage/door/{command}` accepting `open|close|toggle` to publish MQTT command
+  - Validates MQTT connectivity; returns status JSON
+
+- [x] Server: Database layer scaffolded with async SQLAlchemy (2025-08-24)
+  - Added `server/database/` with `config.py`, `engine.py`, `models.py`, `init.py`, `repositories.py`
+  - App initializes tables on startup via `init_db()` in `server/api/main.py`
+  - Added `GET /db/health` endpoint
+  - Updated `server/requirements.txt` to include `asyncpg`
 
 ## Discovered During Work
 - [x] Harden deployment script mpremote interactions with reset + retries to mitigate "could not enter raw repl" errors (2025-08-15)
@@ -335,6 +367,7 @@ The LLM can automatically update and create tasks as needed.
 - [x] Renamed project branding to IRIS (Intelligent Residence Information System); updated `design_doc.md` and `README.md` accordingly (2025-08-15)
 - [x] Deploy script: Added fallback to upload local `shared/vendor/bmp3xx.py` to device `/lib/` when `mip install bmp3xx` is unavailable (2025-08-18)
 - [x] BMP388 driver uses I2C address 0x76 by default since SDO is tied to GND; Pico W I2C bus 1 on GP6 (SDA) / GP7 (SCL) at 400kHz (2025-08-19)
+ - [x] Introduced async SQLAlchemy engine/session and initial schema on the server to support historical data and SOS tracking (2025-08-24)
 
 ## Discovered Tasks & Notes
 - [ ] Consider adding backup power monitoring for critical devices
