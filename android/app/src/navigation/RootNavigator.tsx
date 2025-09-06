@@ -2,6 +2,7 @@ import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useTheme } from 'react-native-paper';
 import HomeScreen from '../screens/HomeScreen';
+import SettingsScreen from '../screens/SettingsScreen';
 import { View } from 'react-native';
 
 const Tab = createBottomTabNavigator();
@@ -26,7 +27,7 @@ export default function RootNavigator() {
       <Tab.Screen name="Devices" children={() => <Placeholder title="Devices" />} />
       <Tab.Screen name="SOS" children={() => <Placeholder title="SOS" />} />
       <Tab.Screen name="History" children={() => <Placeholder title="History" />} />
-      <Tab.Screen name="Settings" children={() => <Placeholder title="Settings" />} />
+      <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );
 }

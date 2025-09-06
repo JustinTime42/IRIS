@@ -1,13 +1,23 @@
 import React from 'react';
-import { ScrollView, View } from 'react-native';
-import { useTheme, Text, Card, Button, Chip, ActivityIndicator } from 'react-native-paper';
-import { useDoorState, useDoorCommand, useGarageWeather, useGarageFreezer, useLightSet, useLightToggle, useDevices } from '../hooks/useGarage';
+import { ScrollView, View, Pressable } from 'react-native';
+import { useTheme, Card, Text, Button } from 'react-native-paper';
+import { useDoorState, useDoorCommand, useGarageWeather, useGarageFreezer, useLightToggle, useLightState, useDevices } from '../hooks/useGarage';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import GarageDoorGlyph from '../shared/GarageDoorGlyph';
 
-const Tile: React.FC<{ title: string; subtitle?: string; actions?: React.ReactElement[]; status?: string }> = ({ title, subtitle, actions, status }) => {
+const Tile: React.FC<{ title: string; subtitle?: string; actions?: React.ReactElement[]; status?: React.ReactNode }> = ({ title, subtitle, actions, status }) => {
   const theme = useTheme();
   return (
     <Card style={{ margin: 8, backgroundColor: theme.colors.surface }}>
-      <Card.Title title={title} subtitle={subtitle} right={() => status ? <Chip style={{ marginRight: 8 }}>{status}</Chip> : null} />
+      <Card.Title
+        title={title}
+        subtitle={subtitle}
+        right={() => status ? (
+          <View style={{ marginRight: 8 }}>
+            {typeof status === 'string' ? <Text>{status}</Text> : status}
+          </View>
+        ) : null}
+      />
       {actions ? <Card.Actions>{actions.map((el, idx) => React.cloneElement(el, { key: el.key ?? idx }))}</Card.Actions> : null}
     </Card>
   );
@@ -20,7 +30,7 @@ export default function HomeScreen() {
   const { data: weather, isLoading: weatherLoading } = useGarageWeather();
   const { data: freezer, isLoading: freezerLoading } = useGarageFreezer();
   const toggleLight = useLightToggle();
-  const setLight = useLightSet();
+  const { data: light, isLoading: lightLoading } = useLightState();
   const { data: devices } = useDevices();
 
   // Helpers
@@ -30,31 +40,76 @@ export default function HomeScreen() {
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.background }} contentContainerStyle={{ padding: 8 }}>
       {/* Alert Row placeholder */}
-      <View style={{ margin: 8 }}>
-        <Text variant="titleMedium">Command Center</Text>
+      {/* Header text removed per Jarvish theme polish */}
+
+      {/* Compact Controls Row: Garage Door + Flood Light */}
+      <View style={{ flexDirection: 'row' }}>
+        {/* Garage Door Card */}
+        <Pressable
+          style={({ pressed }) => ({ flex: 1, margin: 8, transform: [{ scale: pressed ? 0.98 : 1 }] })}
+          onPress={() => { if (!doorCmd.isPending && !doorLoading) doorCmd.mutate('toggle'); }}
+          disabled={doorCmd.isPending || doorLoading}
+        >
+          <Card
+            style={{
+              flex: 1,
+              backgroundColor: theme.colors.surface,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: theme.colors.outlineVariant ?? '#4a4a4a',
+              elevation: 4,
+              shadowColor: '#000',
+              shadowOpacity: 0.25,
+              shadowRadius: 6,
+              shadowOffset: { width: 0, height: 3 },
+              overflow: 'hidden',
+              opacity: (doorCmd.isPending || doorLoading) ? 0.7 : 1,
+            }}
+          >
+            <Card.Content>
+              <View style={{ alignItems: 'center', paddingVertical: 6 }}>
+                <GarageDoorGlyph state={door?.state as any} size={28} />
+                <Text style={{ marginTop: 8, opacity: 0.8 }}>Garage Door</Text>
+              </View>
+            </Card.Content>
+          </Card>
+        </Pressable>
+
+        {/* Flood Light Card */}
+        <Pressable
+          style={({ pressed }) => ({ flex: 1, margin: 8, transform: [{ scale: pressed ? 0.98 : 1 }] })}
+          onPress={() => { if (!toggleLight.isPending && !lightLoading) toggleLight.mutate(); }}
+          disabled={toggleLight.isPending || lightLoading}
+        >
+          <Card
+            style={{
+              flex: 1,
+              backgroundColor: theme.colors.surface,
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: theme.colors.outlineVariant ?? '#4a4a4a',
+              elevation: 4,
+              shadowColor: '#000',
+              shadowOpacity: 0.25,
+              shadowRadius: 6,
+              shadowOffset: { width: 0, height: 3 },
+              overflow: 'hidden',
+              opacity: (toggleLight.isPending || lightLoading) ? 0.7 : 1,
+            }}
+          >
+            <Card.Content>
+              <View style={{ alignItems: 'center', paddingVertical: 6 }}>
+                <MaterialCommunityIcons
+                  name={light?.state === 'on' ? 'lightbulb-on' : 'lightbulb-outline'}
+                  size={26}
+                  color={light?.state === 'on' ? '#FFD54F' : theme.colors.onSurfaceDisabled}
+                />
+                <Text style={{ marginTop: 8, opacity: 0.8 }}>Flood Light</Text>
+              </View>
+            </Card.Content>
+          </Card>
+        </Pressable>
       </View>
-
-      {/* Garage Door */}
-      <Tile
-        title="Garage Door"
-        status={doorLoading ? '...' : door?.state}
-        actions={[
-          <Button mode="contained" onPress={() => doorCmd.mutate('open')} loading={doorCmd.isPending} disabled={doorCmd.isPending}>Open</Button>,
-          <Button onPress={() => doorCmd.mutate('close')} disabled={doorCmd.isPending}>Close</Button>,
-          <Button mode="outlined" onPress={() => doorCmd.mutate('toggle')} disabled={doorCmd.isPending}>Toggle</Button>,
-        ]}
-      />
-
-      {/* Flood Light */}
-      <Tile
-        title="Flood Light"
-        status={toggleLight.isPending || setLight.isPending ? '...' : undefined}
-        actions={[
-          <Button mode="contained" onPress={() => setLight.mutate('on')} loading={setLight.isPending} disabled={setLight.isPending}>On</Button>,
-          <Button mode="outlined" onPress={() => toggleLight.mutate()} disabled={toggleLight.isPending}>Toggle</Button>,
-          <Button onPress={() => setLight.mutate('off')} disabled={setLight.isPending}>Off</Button>,
-        ]}
-      />
 
       {/* Weather */}
       <Tile

@@ -2,6 +2,13 @@
 
 export type DoorState = 'open' | 'closed' | 'opening' | 'closing' | 'error';
 
+export interface LightState {
+  /** Current light state */
+  state: 'on' | 'off';
+  /** ISO datetime string when last updated (if available) */
+  last_updated?: string;
+}
+
 export interface WeatherState {
   /** Temperature in Fahrenheit */
   temperature_f: number;

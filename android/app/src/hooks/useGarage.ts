@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
-import type { WeatherState, FreezerState, DoorState, DevicesResponse } from '../types/api';
+import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState } from '../types/api';
 
 /**
  * Weather
@@ -49,12 +49,28 @@ export function useDoorCommand() {
 /**
  * Light Commands
  */
+export function useLightState() {
+  return useQuery<LightState>({
+    queryKey: ['garage', 'light', 'state'],
+    queryFn: api.getLightState,
+    refetchInterval: 5_000,
+  });
+}
+
 export function useLightToggle() {
-  return useMutation({ mutationFn: api.lightToggle });
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.lightToggle,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['garage', 'light', 'state'] }),
+  });
 }
 
 export function useLightSet() {
-  return useMutation({ mutationFn: (state: 'on' | 'off') => api.lightSet(state) });
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (state: 'on' | 'off') => api.lightSet(state),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['garage', 'light', 'state'] }),
+  });
 }
 
 /**

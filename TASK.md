@@ -123,6 +123,15 @@ The LLM can automatically update and create tasks as needed.
   - [ ] Implement update triggering
   - [ ] Add authentication and security
 
+- [ ] Themes & Appearance (2025-08-29)
+  - [x] Scaffold theme engine (tokens, registry, Paper/Nav mappers, provider)
+  - [x] Add Settings screen with runtime theme switching
+  - [ ] Add visual primitives (AppCard/AppButton) to simplify radical theming
+  - [ ] Implement Retro (Green/Amber) effects (scanlines, pixel borders)
+  - [ ] Implement Jarvis effects (glass/blur, glow accents)
+  - [ ] Persist theme selection and support System (Auto)
+  - [x] Jarvish theme polish pass: removed "Command Center" header; replaced flood light status with bulb icon and garage door with custom glyph (2025-08-30)
+
 - [ ] Implement FCM integration
   - [ ] Set up Firebase project
   - [ ] Configure FCM for push notifications
@@ -361,6 +370,14 @@ The LLM can automatically update and create tasks as needed.
   - Added `GET /db/health` endpoint
   - Updated `server/requirements.txt` to include `asyncpg`
 
+- [x] Mobile App: Consolidated garage door and light controls into single-toggle buttons with status and progress UI (2025-08-29)
+  - Replaced separate On/Off/Toggle (light) and Open/Close/Toggle (door) with one Toggle button each in `android/app/src/screens/HomeScreen.tsx`
+  - Added end-state hints (e.g., "Next: Close") and status chips showing current state or "Sending…"
+  - Displayed in-progress UI: indeterminate `ProgressBar` when sending command and when door is "opening"/"closing"
+  - Introduced `useLightState()` and `api.getLightState()` to fetch/display current light state
+
+- [x] Documentation: Added wiring overview and CAT5 (T568B) mapping for weather station to `devices/garage-controller/PINOUT.md` (2025-08-29)
+
 ## Discovered During Work
 - [x] Harden deployment script mpremote interactions with reset + retries to mitigate "could not enter raw repl" errors (2025-08-15)
 - [x] Added scaffold for `devices/house-monitor/app/` with `main.py` and `sensors.py`; created `deployment/devices/house-monitor/README.md` to instruct creating local `device.json` (gitignored) (2025-08-15)
@@ -368,6 +385,8 @@ The LLM can automatically update and create tasks as needed.
 - [x] Deploy script: Added fallback to upload local `shared/vendor/bmp3xx.py` to device `/lib/` when `mip install bmp3xx` is unavailable (2025-08-18)
 - [x] BMP388 driver uses I2C address 0x76 by default since SDO is tied to GND; Pico W I2C bus 1 on GP6 (SDA) / GP7 (SCL) at 400kHz (2025-08-19)
  - [x] Introduced async SQLAlchemy engine/session and initial schema on the server to support historical data and SOS tracking (2025-08-24)
+
+- [x] Mobile App: Added theme engine scaffolding and Settings screen to switch themes at runtime; added dependencies `expo-blur` and `@react-native-async-storage/async-storage` to support glass effects and persistence (2025-08-29)
 
 ## Discovered Tasks & Notes
 - [ ] Consider adding backup power monitoring for critical devices

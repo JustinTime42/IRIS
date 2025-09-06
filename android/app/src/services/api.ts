@@ -1,5 +1,5 @@
 import { Config } from '../shared/config';
-import type { WeatherState, FreezerState, DoorState, DevicesResponse } from '../types/api';
+import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState } from '../types/api';
 
 /**
  * Simple JSON fetch helper.
@@ -30,6 +30,7 @@ export const api = {
     jsonFetch<unknown>(`/api/garage/door/${command}`, { method: 'POST' }),
 
   // Flood Light
+  getLightState: () => jsonFetch<LightState>('/api/garage/light/state'),
   lightSet: (state: 'on' | 'off') => jsonFetch<unknown>(`/api/garage/light/${state}`, { method: 'POST' }),
   lightToggle: () => jsonFetch<unknown>('/api/garage/light/toggle', { method: 'POST' }),
 

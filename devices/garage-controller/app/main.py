@@ -183,18 +183,28 @@ class GarageController:
             return 'closed'
 
         # Transition: neither switch active
-        # Infer direction from last known or expected target
+        # Infer direction with priority:
+        #  1) Last known terminal state ('open'/'closed')
+        #  2) Expected target (from last command)
+        #  3) Last transitional state
         expected = getattr(self, "_expected", None)
         last = getattr(self, "last_door_state", None)
-        if expected == 'open' or last == 'closed':
-            return 'opening'
-        if expected == 'closed' or last == 'open':
+        # Priority 1: last terminal states
+        if last == 'open':
             return 'closing'
-        # Fallback if unknown
-        if last in ('opening', 'open'):
+        if last == 'closed':
             return 'opening'
-        if last in ('closing', 'closed'):
+        # Priority 2: command hint when terminal state unknown
+        if expected == 'open':
+            return 'opening'
+        if expected == 'closed':
             return 'closing'
+        # Priority 3: keep previous transitional trend
+        if last in ('opening',):
+            return 'opening'
+        if last in ('closing',):
+            return 'closing'
+        # Default bias
         return 'closing'
     
     def toggle_garage_door(self):
