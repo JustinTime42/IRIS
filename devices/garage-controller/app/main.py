@@ -300,7 +300,7 @@ class GarageController:
                 "device_id": self.device_id,
                 "error": error,
                 "message": message,
-                "timestamp": time.ticks_ms(),
+                "timestamp42": time.ticks_ms(),
             }
             try:
                 body = json.dumps(payload)
