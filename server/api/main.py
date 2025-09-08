@@ -13,6 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
 from pathlib import Path
+import hashlib
 
 """
 Database imports: handle both package and direct execution contexts.
@@ -615,12 +616,39 @@ def _build_update_manifest(device_id: str, ref: Optional[str]) -> Dict[str, Any]
         dict: Payload with "files" list containing url/path entries.
     """
     use_ref = (ref or GITHUB_DEFAULT_REF).strip()
-    entries: list[Dict[str, str]] = []
+    entries: list[Dict[str, Any]] = []
+    
+    def _size_and_sha256(abs_path: Path) -> Tuple[int, str]:
+        try:
+            size = abs_path.stat().st_size
+        except Exception:
+            size = 0
+        sha = ""
+        try:
+            h = hashlib.sha256()
+            with open(abs_path, "rb") as fp:
+                for chunk in iter(lambda: fp.read(65536), b""):
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            sha = h.hexdigest()
+        except Exception:
+            sha = ""
+        return size, sha
+    
     for repo_path, device_path in _iter_device_files(device_id):
-        entries.append({
+        abs_path = PROJECT_ROOT / repo_path
+        size, sha = _size_and_sha256(abs_path)
+        entry: Dict[str, Any] = {
             "url": _raw_url_for(repo_path, use_ref),
             "path": device_path,
-        })
+        }
+        # Only include validators when available to keep backward-compat flexible
+        if size:
+            entry["size"] = size
+        if sha:
+            entry["sha256"] = sha
+        entries.append(entry)
     if not entries:
         logger.error("OTA manifest empty for device_id=%s at PROJECT_ROOT=%s (ref=%s)", device_id, str(PROJECT_ROOT), use_ref)
         raise HTTPException(status_code=404, detail=f"No deployable files found for device_id='{device_id}' at PROJECT_ROOT='{PROJECT_ROOT}'")

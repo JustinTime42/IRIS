@@ -61,54 +61,25 @@ The system employs a hub-and-spoke MQTT architecture with the Linux server as th
 #### 3.2.1 Pico W Two-Tier Architecture
 
 **Tier 1: Immortal Bootstrap Layer** (Never Updated)
-* **Runtime**: MicroPython with minimal, bulletproof code
-* **Responsibilities**: 
-  * WiFi and MQTT connection management
-  * HTTP-based update downloads and deployment
-  * Application error handling and recovery
-  * SOS message transmission
-  * Device identification and health monitoring
-* **Files**: `main.py`, `bootstrap_manager.py` (flashed once, never changed)
+* **Runtime**: MicroPython with a minimal, bulletproof scheduler loop
+* **Responsibilities**:
+  * WiFi and MQTT connection management (single client owned by bootstrap)
+  * Non-blocking main loop that never yields control to the app indefinitely
+  * MQTT message pump and routing to app callbacks
+  * HTTP-based OTA update orchestration (quiesce app → apply → reset)
+  * Application lifecycle supervision (init/tick/shutdown)
+  * SOS message transmission and health heartbeat
+  * Device identification, boot/version announcements, LED indications
+* **Files**: `devices/bootstrap/main.py`, `devices/bootstrap/bootstrap_manager.py`, `devices/bootstrap/http_updater.py` (flashed once, never changed)
 
 **Tier 2: Application Layer** (Updated via OTA)
-* **Runtime**: MicroPython application code
+* **Runtime**: MicroPython application code as a cooperative plugin
 * **Responsibilities**:
-  * Device-specific sensor reading and control
-  * MQTT data publishing and command handling
-  * Business logic for automation functions
-* **Files**: All files in `app/` directory (replaced during updates)
-
-#### 3.2.2 Repository Structure
-
-Note: The project name is IRIS (Intelligent Residence Information System). The repository folder on disk may still be named `corvids-nest`.
-
-```
-corvids-nest/
-├── android/                    # React Native app (future)
-├── devices/
-│   ├── bootstrap/              # Immortal bootstrap (never OTA-updated)
-│   │   ├── main.py
-│   │   ├── bootstrap_manager.py
-│   │   └── http_updater.py
-│   └── <device_id>/
-│       └── app/                # Device-specific app sources (deployed to :/app)
-│           ├── main.py         # Entrypoint, defines main()
-│           └── ...             # Optional helpers for that device
-├── shared/                     # Reusable MicroPython modules
-│   ├── __init__.py
-│   ├── wifi_manager.py
-│   ├── mqtt_client.py
-│   └── config_manager.py
-│       └── config/
-├── shared/
-│   ├── mqtt_client.py          # Common MQTT functionality
-│   ├── wifi_manager.py         # WiFi connection management
-│   ├── sensor_utils.py         # Common sensor utilities
-│   └── config_manager.py       # Configuration management
-└── deployment/
-    ├── device_configs.json     # Device identification mapping
-    └── scripts/                # Deployment automation
-```
+  * Device-specific IO and business logic
+  * Register MQTT topic subscriptions via runtime and handle commands
+  * Periodic telemetry and sensor publishing in short `tick()` slices
+  * Quiesce quickly on `shutdown()` when the bootstrap initiates OTA
+* **Files**: `devices/<device_id>/app/**` (replaced during updates)
 
 #### 3.2.3 Linux Server Stack
 
@@ -133,81 +104,87 @@ corvids-nest/
 
 ### 4.1 MQTT Topic Structure
 
-    home/
-    ├── garage/
-    │   ├── door/
-    │   │   ├── status → "closed", "open", "opening", "closing"
-    │   │   └── command → "open", "close"
-    │   ├── light/
-    │   │   ├── status → "on", "off"
-    │   │   └── command → "on", "off", "toggle"
-    │   ├── weather/
-    │   │   ├── temperature → float (°F)
-    │   │   ├── humidity → float (%)
-    │   │   └── pressure → float (inHg)
-    │   └── freezer/
-    │       └── temperature → float (°F)
-    ├── power/
-    │   └── city/
-    │       ├── status → "online", "offline" (via last will)
-    │       └── heartbeat → timestamp
-    ├── freezer/
-    │   ├── temperature/
-    │   │   ├── main → float (°F)
-    │   │   └── backup → float (°F)
-    │   └── door/
-    │       ├── status → "closed", "open"
-    │       └── ajar_time → int (seconds)
-    └── system/
-        └── {device_id}/
-            ├── update → "update" (triggers HTTP download)
-            ├── status → "running", "updating", "sos", "recovered"
-            ├── sos → JSON: {"error": "...", "timestamp": int, "details": "..."}
-            ├── health → "online", "error", "needs_help"
-            └── version → commit_sha or "unknown"
-
-### 4.2 Bootstrap Layer Communication
-
-The immortal bootstrap layer handles all critical MQTT communication:
-
-```python
-# Bootstrap MQTT Topics (Device → Server)
-home/system/{device_id}/sos         # Emergency help requests
-home/system/{device_id}/status      # System status updates  
-home/system/{device_id}/health      # Periodic health checks
-home/system/{device_id}/boot        # Boot notifications
-
-# Bootstrap MQTT Topics (Server → Device)  
-home/system/{device_id}/update      # Trigger OTA updates
-home/system/{device_id}/reboot      # Force device reboot
-home/system/{device_id}/ping        # Health check requests
+```
+home/
+  garage/
+    door/
+      status → "closed", "open", "opening", "closing"
+      command → "open", "close", "toggle"
+    light/
+      status → "on", "off"
+      command → "on", "off", "toggle"
+    weather/
+      temperature → float (°F)
+      humidity → float (%)
+      pressure → float (inHg)
+    freezer/
+      temperature → float (°F)
+  power/
+    city/
+      status → "online", "offline" (via last will)
+      heartbeat → timestamp
+  freezer/
+    temperature/
+      main → float (°F)
+      backup → float (°F)
+    door/
+      status → "closed", "open"
+      ajar_time → int (seconds)
+  system/
+    {device_id}/
+      update → JSON manifest (triggers OTA)
+      status → "running", "update_received", "updating", "updated", "alive"
+      sos → JSON {error, message, timestamp, device_id}
+      health → "online", "error", "needs_help"
+      version → commit_sha or "unknown"
 ```
 
-### 4.3 API Architecture
+### 4.2 Bootstrap Layer Communication and Ownership
 
-#### 4.3.1 REST Endpoints
+- Single MQTT client owned by the bootstrap for all topics.
+- Bootstrap subscribes to system topics and any app-registered topics; dispatches app topics to registered callbacks.
+- App publishes via the runtime provided by the bootstrap (no separate client in the app).
 
-* **Commands**: POST endpoints for device control operations
-* **Status**: GET endpoints for current system state
-* **History**: GET endpoints for historical data with pagination  
-* **Updates**: POST endpoints for triggering device updates
-* **SOS Management**: GET/POST endpoints for viewing and resolving SOS incidents
-* **Configuration**: GET/POST endpoints for system configuration
+### 4.3 App Runtime Interface
 
-#### 4.3.2 WebSocket Channels
+The bootstrap passes a `runtime` object to the app during `init(runtime)`. The app never creates its own MQTT client.
 
-* **Real-time Status**: Live updates for all sensor data and device states
-* **SOS Alerts**: Immediate notification of device distress signals
-* **Update Progress**: Live feedback during device update operations
-* **System Health**: Device health status and recovery operations
-* **Connection Health**: Heartbeat and connection status for all devices
+```text
+runtime.publish(topic: str, payload: str|bytes, retain: bool = False) -> bool
+runtime.subscribe(topic: str, callback: Callable[[str, bytes], None], fast: bool = False) -> None
+runtime.unsubscribe(topic: str) -> None
+runtime.sos(error: str, message: str = "") -> None
+runtime.now_ms() -> int
+runtime.log(level: str, msg: str) -> None  # optional convenience
+```
 
-### 4.4 Remote Access Strategy
+- fast=True runs the callback immediately in the dispatch path (must be short-running). Use for door/light commands.
+- fast=False enqueues for processing in the next `tick()` to avoid long work in the dispatch path.
 
-* **Primary**: Tailscale VPN for secure remote access
-* **Architecture**: All remote connections appear as local network access
-* **Security**: No port forwarding, no exposed services, encrypted mesh network
-* **Fallback**: Prepared for reverse proxy implementation if needed
+### 4.4 Bootstrap Scheduler Loop
+
+- Frequency target: 50–100 Hz (10–20ms per iteration typical on Pico W).
+- Each iteration:
+  1) Update LED based on state
+  2) Ensure WiFi connected (backoff)
+  3) Ensure MQTT connected; publish LWT and boot/version on connect
+  4) Pump MQTT messages and dispatch to system/app handlers
+  5) Publish periodic health (e.g., every 30s)
+  6) Call `app.tick()` if app is initialized (must return quickly)
+
+- Error handling: any exception from app callbacks or `tick()` results in an SOS; bootstrap continues running and remains responsive to updates.
+
+### 4.5 OTA Flow (Bootstrap-Only)
+
+- Trigger: server publishes manifest to `home/system/{device_id}/update`.
+- Bootstrap sequence:
+  1) Publish `status=update_received`
+  2) Publish `status=updating`
+  3) Quiesce the app: call `app.shutdown(reason="update")` with a short timeout (e.g., 1–2s)
+  4) Download and apply files via `HttpUpdater` (protect bootstrap files)
+  5) Publish `status=updated`
+  6) `machine.reset()` to reload updated modules cleanly
+- On any failure during OTA: publish SOS with details and remain in the scheduler loop.
 
 ## Bootstrap Layer Architecture
 
@@ -215,184 +192,43 @@ home/system/{device_id}/ping        # Health check requests
 
 ### 5.1 Immortal Bootstrap Design
 
-The bootstrap layer is designed to be completely reliable and never require updates. It contains a hardcoded device ID and minimal, bulletproof code responsible for WiFi connection, MQTT communication, and application lifecycle management. The bootstrap never attempts to update itself, ensuring it remains a stable recovery mechanism.
+The bootstrap layer runs a cooperative scheduler that never blocks and never yields control to the app indefinitely. It owns the single MQTT client, routes messages to the app, and orchestrates OTA safely by quiescing the app before applying updates.
 
 ### 5.2 Bootstrap Manager Functions
 
-The bootstrap manager implements the core system loop that never exits. It establishes network connectivity, subscribes to MQTT update commands, and attempts to load and run the application layer. When the application crashes or fails, the bootstrap catches all exceptions and handles them gracefully without terminating the system process.
-
 Key responsibilities include:
-* **Application Lifecycle Management**: Loading, running, and restarting the application layer
-* **Error Recovery**: Catching application failures and maintaining system stability
-* **SOS Communication**: Sending detailed error information to the server when help is needed
-* **Update Coordination**: Receiving and executing OTA update commands
-* **Help Mode**: Entering a responsive waiting state when manual intervention is required
+* Application lifecycle (init/tick/shutdown) and supervision
+* Error recovery and SOS
+* MQTT ownership, routing, LWT, and health
+* OTA update coordination (quiesce → apply → reset)
+* Help mode with responsive MQTT pumping
 
 ### 5.3 HTTP Update System
 
-The HTTP updater uses GitHub's REST API to selectively download only the files needed by the specific device. It downloads device-specific application code, shared libraries, and configuration files while never touching the bootstrap layer. The update process overwrites existing application files and reports success or failure status back to the server via MQTT.
-
-## Data Management and Alert System
-
-----------------------------------
-
-### 5.1 Enhanced Alert System
-
-The alert system now includes device health monitoring and SOS handling:
-
-#### 5.1.1 Alert Types
-
-* **Environmental Alerts**: Freezer temperature, door ajar conditions
-* **Device Health Alerts**: Device offline, repeated failures, communication issues
-* **SOS Alerts**: Device distress signals requiring immediate attention
-* **System Alerts**: Power outages, infrastructure failures
-
-#### 5.1.2 SOS Message Handling
-
-The SOS handler processes incoming distress signals from devices and coordinates the human intervention workflow. When a device sends an SOS message, the system immediately logs the incident, tracks the device as needing help, and sends high-priority push notifications to the mobile application.
-
-The SOS system maintains state for all active incidents and provides detailed error information including device identification, error descriptions, timestamps, and system state at the time of failure. This enables quick diagnosis and targeted fixes rather than blind troubleshooting.
-
-### 5.2 Data Storage Strategy
-
-* **Real-time Data**: In-memory Python dictionaries for current sensor values and device status
-* **Historical Data**: PostgreSQL with time-series tables for sensor readings and system events
-* **SOS Incidents**: PostgreSQL table with full SOS history and resolution tracking
-* **Device Health**: PostgreSQL tables tracking device status, boot cycles, and error patterns
-* **Configuration**: PostgreSQL tables with in-memory caching for device configurations
-
-### 5.3 Database Schema Design
-
-The database schema includes specialized tables for tracking SOS incidents, device health metrics, and boot cycles. The SOS incidents table maintains a complete audit trail of all device failures, resolution status, and human intervention notes. 
-
-Device health tracking includes real-time status, boot counts, error counts, last known errors, and version information. The boot log captures all device startup events with contextual information about boot reasons and success status.
-
-Key schema components:
-* **SOS Incidents**: Complete incident tracking with resolution workflow
-* **Device Health**: Real-time status and historical health metrics  
-* **Device Boots**: Audit trail of all device startup events
-* **System Events**: Comprehensive logging of power outages and system changes
+- Updater writes only app/shared files; bootstrap files are protected.
+- Recommended write strategy: write to temporary file then rename to final path to reduce partial write risks.
+- After successful apply, a device reset ensures clean imports of updated modules.
 
 ## Update and Deployment Strategy
 
 ---------------------------------
 
-### 6.1 Single Repository Workflow
-
-**Development Process**:
-1. **Make changes** to any component (Android, server, or device code)
-2. **Commit to repository** - all components stay synchronized
-3. **Trigger updates** via mobile app or web dashboard
-4. **Devices update** via HTTP API selective download
-
 ### 6.2 HTTP-Based Update System
 
-**Update Trigger Flow**:
-```
-Mobile App → Server API → MQTT Command → Device Bootstrap → GitHub API → Deploy
-```
-
-**Device Update Process**:
-1. **Bootstrap receives** MQTT update command
-2. **Downloads files** via GitHub API (only device-specific directories)
-3. **Overwrites application** files (never touches bootstrap)
-4. **Reports status** via MQTT
-5. **Attempts to run** new application code
-6. **Sends SOS** if new code fails
+**Device Update Process (Bootstrap-Owned):**
+1. Bootstrap receives MQTT `update` command
+2. Publishes `update_received` and `updating`
+3. Requests app `shutdown()` and waits briefly
+4. Downloads and applies application/shared files via HTTP (never bootstrap)
+5. Publishes `updated`
+6. Resets device to load new code
 
 ### 6.3 Update Safety Mechanisms
 
-* **Bootstrap Isolation**: Update mechanism never gets updated, eliminating bootstrap corruption
-* **Selective Download**: Only application code gets replaced
-* **Immediate Feedback**: SOS messages provide instant failure notification
-* **Human Oversight**: No automatic retries, requires human intervention for recovery
-* **GitHub as Backup**: Source repository serves as the ultimate backup system
-
-### 6.5 Deployment Automation
-
-The repository includes `deployment/scripts/deploy.py`, a Python script that automates flashing and configuration of Pico W devices using `mpremote`:
-
-* **Device selection**: Reads `deployment/device_index.json` and prompts the operator to choose a device entry (which specifies the per-device config path).
-* **Port selection**: Lists available Pico serial ports via `mpremote connect list` and prompts for confirmation.
-* **Config merge**: Merges `deployment/common/network.json` (shared WiFi/MQTT) with the selected per-device `device.json`. Device-specific values override common values. The merged output is uploaded as `:/config/device.json`.
-* **File deployment**:
-  - Uploads `devices/bootstrap/*` into device root (`:/main.py`, `:/bootstrap_manager.py`, `:/http_updater.py`).
-  - Uploads the entire `shared/` directory to `:/shared/`.
-  - If present, uploads `devices/<device_id>/app/` to `:/app/` (bootstrap imports `app.main.main()`).
-* **Reset**: Soft-resets the device to start the bootstrap and app.
-
-Security note: Per-device configs (with secrets) live under `deployment/devices/<device_id>/device.json` and are gitignored by default, while the template `_template.device.json` remains tracked.
-
-### 6.4 Development and Testing Workflow
-
-The development workflow leverages the single repository structure for coordinated updates across all system components. Developers can make changes to any component, commit to the repository, and trigger selective updates to test devices. The workflow supports both individual device testing and coordinated system-wide deployments.
-
-Key workflow elements:
-1. **Local Development**: Edit code with immediate testing via development dashboard
-2. **Version Control**: Single repository maintains all component synchronization  
-3. **Selective Testing**: Deploy updates to individual devices for validation
-4. **Coordinated Deployment**: Update multiple devices simultaneously
-5. **SOS Monitoring**: Track deployment success via SOS message absence
-
-## Error Handling and Reliability
-
----------------------------------
-
-### 7.1 Multi-Layer Error Handling
-
-**Layer 1: Bootstrap (Bulletproof)**
-* Handles all system-level failures
-* WiFi/MQTT reconnection
-* Application crash recovery
-* SOS message transmission
-* Never gets updated
-
-**Layer 2: Application (Replaceable)**
-* Device-specific error handling
-* Graceful sensor failure handling
-* MQTT communication errors
-* Updated via OTA as needed
-
-### 7.2 Failure Recovery Patterns
-
-**Application Crashes**:
-```
-App Exception → Bootstrap Catches → SOS Message → Human Fixes → Update Command → Recovery
-```
-
-**Boot Failures**:
-```
-Boot Failure → Bootstrap Detects → SOS Message → Wait for Fix → Update Command → Retry
-```
-
-**Update Failures**:
-```
-Update Exception → Bootstrap Catches → SOS Message → Human Investigates → Fixed Update
-```
-
-### 7.3 Device Health Monitoring
-
-The device health monitoring system continuously tracks all devices for signs of failure or degradation. It monitors heartbeat messages, tracks SOS frequency patterns, and detects boot loop conditions that indicate persistent problems.
-
-The monitoring system implements escalation procedures for devices showing repeated failures and provides early warning for devices that may need intervention. Health metrics include connectivity status, error frequency, boot success rates, and response time patterns.
-
-## Security Architecture
-
-------------------------
-
-### 8.1 Network Security
-
-* **VPN Access**: Tailscale mesh network for all remote access
-* **Internal Communication**: MQTT over local network only
-* **No External Exposure**: No services exposed to public internet
-* **GitHub API**: Uses personal access tokens for repository access
-
-### 8.2 Application Security
-
-* **API Authentication**: JWT tokens for client application access
-* **Input Validation**: Comprehensive validation of all API inputs and MQTT messages
-* **Rate Limiting**: Protection against abuse and DoS attacks
-* **SOS Validation**: Verification of SOS message authenticity and rate limiting
+* Bootstrap isolation and single MQTT client authority
+* App quiesce before writes; short timeout to proceed if app is unresponsive
+* Immediate feedback via status and SOS
+* Reset after update to guarantee clean reload
 
 ## Implementation Phases
 
@@ -400,64 +236,123 @@ The monitoring system implements escalation procedures for devices showing repea
 
 ### 12.1 Phase 1: Bootstrap Infrastructure
 
-* **Bootstrap layer development**: Immortal bootstrap code with HTTP updater
-* **Basic MQTT communication**: Device identity, health messages, update commands
-* **GitHub API integration**: Selective file download system
-* **SOS message system**: Basic error reporting and mobile notifications
-* **Development dashboard**: Manual update triggering and device monitoring
+- Implement non-blocking bootstrap scheduler (loop + MQTT pump)
+- Introduce runtime API and app lifecycle (init/tick/shutdown)
+- Centralize MQTT in bootstrap with message routing and LWT
+- Keep OTA strictly in bootstrap with quiesce → apply → reset
 
 ### 12.2 Phase 2: Device Integration
 
-* **Application layer separation**: Move existing device code to app/ directories
-* **HTTP update testing**: Verify selective download and deployment
-* **Error handling integration**: Test SOS generation and recovery workflows
-* **Mobile SOS handling**: FCM integration and SOS incident management
-* **Multi-device coordination**: Update multiple devices simultaneously
+- Refactor device apps (e.g., `garage-controller`) to plugin lifecycle
+- Replace app-owned MQTT clients with runtime API usage
+- Validate command responsiveness (fast callbacks) and periodic telemetry in `tick()`
 
 ### 12.3 Phase 3: Production Deployment
 
-* **Physical device setup**: Flash bootstrap code to all devices
-* **Application deployment**: Initial OTA deployment of device applications
-* **Mobile app completion**: Full SOS handling and device management features
-* **System monitoring**: Comprehensive device health monitoring and alerting
+- Flash bootstrap once; deploy app-only updates via OTA
+- Server-driven manifests remain unchanged
+- Run drills: app fault, network drop, OTA failure → verify SOS and recovery
 
-### 12.4 Phase 4: Advanced Features
+## Error Handling and Reliability
 
-* **Historical SOS analysis**: Pattern recognition and predictive maintenance
-* **Automated diagnostics**: Enhanced error reporting with system state
-* **LLM integration**: Voice command processing and intelligent error analysis
-* **Performance optimization**: System refinement based on operational data
+---------------------------------
 
-## Mobile Application Integration
+### 7.1 Multi-Layer Error Handling
 
-----------------------------------
+- Bootstrap catches all app exceptions and continues running
+- App reports issues via `runtime.sos()`; bootstrap publishes SOS
+- OTA failures do not crash the bootstrap; system remains up and subscribes to updates
 
-### 13.1 React Native Architecture
+### 7.3 Device Health Monitoring
 
-The mobile application is built using React Native with Expo for streamlined development and deployment. The UI implements Material Design principles through React Native Paper components, providing a consistent and intuitive user experience.
+- Health heartbeat originates from the bootstrap to avoid duplication
+- App can optionally publish device-local telemetry health (not system health)
 
-**Technology Stack**:
-* **React Native**: Cross-platform mobile development framework
-* **Expo**: Development platform with simplified build and deployment
-* **React Native Paper**: Material Design component library
-* **Firebase Cloud Messaging**: Push notification delivery
-* **WebSocket Integration**: Real-time status updates and system monitoring
+## Testing Strategy
 
-### 13.2 SOS Handling
+------------------
 
-The mobile application provides comprehensive SOS incident management:
+### 8.1 Unit Testing
 
-* **Real-time SOS notifications**: High-priority FCM messages for immediate attention
-* **SOS dashboard**: Current and historical SOS incidents with status tracking
-* **Quick recovery actions**: One-tap update triggering for affected devices
-* **Diagnostic information**: Detailed error logs and device state information
-* **Resolution tracking**: Mark incidents as resolved with notes
+- Test individual components (e.g., MQTT client, OTA updater) in isolation
+- Validate runtime API usage and app lifecycle hooks
 
-### 13.3 Device Management
+### 8.2 Integration Testing
 
-* **Device status overview**: Real-time health status for all devices
-* **Manual update triggering**: Force updates to individual or multiple devices
-* **Update history**: Track successful and failed update attempts
-* **Device configuration**: Remote configuration management via MQTT
+- Test device apps with simulated MQTT and runtime API
+- Validate OTA update flows and error handling
 
-This updated software design specification provides the architectural foundation for building a robust, maintainable home automation system with bulletproof error recovery, unified repository management, and intelligent failure handling that minimizes the need for physical device access.
+### 8.3 System Testing
+
+- Test complete system with multiple devices and server
+- Validate end-to-end functionality and error recovery
+
+## Runtime API
+
+--------------
+
+### 9.1 Runtime API Overview
+
+The runtime API provides a set of functions for the app to interact with the bootstrap and MQTT.
+
+### 9.2 Runtime API Functions
+
+```text
+runtime.publish(topic: str, payload: str|bytes, retain: bool = False) -> bool
+runtime.subscribe(topic: str, callback: Callable[[str, bytes], None], fast: bool = False) -> None
+runtime.unsubscribe(topic: str) -> None
+runtime.sos(error: str, message: str = "") -> None
+runtime.now_ms() -> int
+runtime.log(level: str, msg: str) -> None  # optional convenience
+```
+
+## Scheduler Loop
+
+--------------
+
+### 10.1 Scheduler Loop Overview
+
+The scheduler loop is the main loop of the bootstrap that runs at a high frequency.
+
+### 10.2 Scheduler Loop Functions
+
+- Update LED based on state
+- Ensure WiFi connected (backoff)
+- Ensure MQTT connected; publish LWT and boot/version on connect
+- Pump MQTT messages and dispatch to system/app handlers
+- Publish periodic health (e.g., every 30s)
+- Call `app.tick()` if app is initialized (must return quickly)
+
+## Message Routing
+
+--------------
+
+### 11.1 Message Routing Overview
+
+The message routing system is responsible for dispatching MQTT messages to the app.
+
+### 11.2 Message Routing Functions
+
+- Subscribe to system topics and any app-registered topics
+- Dispatch app topics to registered callbacks
+- Handle MQTT message pump and routing to system/app handlers
+
+## OTA Flow
+
+------------
+
+### 12.1 OTA Flow Overview
+
+The OTA flow is responsible for updating the app via HTTP.
+
+### 12.2 OTA Flow Functions
+
+- Trigger: server publishes manifest to `home/system/{device_id}/update`
+- Bootstrap sequence:
+  1) Publish `status=update_received`
+  2) Publish `status=updating`
+  3) Quiesce the app: call `app.shutdown(reason="update")` with a short timeout (e.g., 1–2s)
+  4) Download and apply files via `HttpUpdater` (protect bootstrap files)
+  5) Publish `status=updated`
+  6) `machine.reset()` to reload updated modules cleanly
+- On any failure during OTA: publish SOS with details and remain in the scheduler loop.

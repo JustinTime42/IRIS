@@ -12,8 +12,18 @@ except ImportError:
     # Allow running on CPython for linting/simulation without network
     import sys
     requests = None  # type: ignore
+try:
+    import uhashlib as hashlib  # type: ignore
+except Exception:
+    try:
+        import hashlib  # type: ignore
+    except Exception:
+        hashlib = None  # type: ignore
 
 import os
+
+CHUNK_SIZE = 1024  # bytes per read; tuned for Pico W RAM profile
+MAX_RETRIES = 2    # per-file download retries
 
 
 class HttpUpdater:
@@ -46,12 +56,30 @@ class HttpUpdater:
         for f in files:
             url = f.get("url")
             path = f.get("path")
+            size = f.get("size")  # optional
+            sha256 = f.get("sha256")  # optional hex digest
             if not url or not path:
                 raise ValueError("Invalid file descriptor: missing url or path")
             if self._is_bootstrap_path(path):
                 # Skip any attempt to modify bootstrap layer
                 continue
-            self._download_to_path(url, path)
+            # Simple retry loop per file
+            last_err = None
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    self._download_to_path(url, path, expected_size=size, expected_sha256=sha256)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    # Best-effort small delay without importing time (may not exist on CPython path)
+                    try:
+                        import time as _t
+                        _t.sleep(0.2)
+                    except Exception:
+                        pass
+            if last_err is not None:
+                raise last_err
 
     # ------------------------------------------------------------------
     def _is_bootstrap_path(self, path: str) -> bool:
@@ -73,13 +101,15 @@ class HttpUpdater:
             return True
         return False
 
-    def _download_to_path(self, url: str, path: str) -> None:
+    def _download_to_path(self, url: str, path: str, expected_size=None, expected_sha256=None) -> None:
         """
         Download file bytes from URL and save to the given path.
 
         Args:
             url (str): HTTP(S) URL to fetch.
             path (str): Relative path to write on device.
+            expected_size (int|None): Optional size for validation.
+            expected_sha256 (str|None): Optional lowercase hex digest for validation.
         """
         if requests is None:
             # In non-MicroPython context, create placeholder file
@@ -88,14 +118,81 @@ class HttpUpdater:
                 fp.write(b"# placeholder written without network\n")
             return
 
-        resp = requests.get(url)  # type: ignore
+        resp = requests.get(url, stream=True)  # type: ignore
+        hasher = None
+        if expected_sha256 and hashlib:
+            try:
+                hasher = hashlib.sha256()  # type: ignore[attr-defined]
+            except Exception:
+                hasher = None
+        bytes_written = 0
+        tmp_path = path + ".new"
         try:
             if resp.status_code != 200:
                 raise OSError("HTTP error {} for {}".format(resp.status_code, url))
-            content = resp.content
             self._ensure_parent_dir(path)
-            with open(path, "wb") as fp:
-                fp.write(content)
+            # Stream to temporary file to improve power-failure safety
+            with open(tmp_path, "wb") as fp:
+                # Prefer raw reads if available
+                raw = getattr(resp, "raw", None)
+                if raw and hasattr(raw, "read"):
+                    while True:
+                        buf = raw.read(CHUNK_SIZE)  # type: ignore
+                        if not buf:
+                            break
+                        fp.write(buf)
+                        bytes_written += len(buf)
+                        if hasher:
+                            try:
+                                hasher.update(buf)  # type: ignore
+                            except Exception:
+                                hasher = None
+                else:
+                    # Fallback: read from resp.content in one shot (may be memory heavy)
+                    content = resp.content
+                    fp.write(content)
+                    bytes_written += len(content)
+                    if hasher:
+                        try:
+                            hasher.update(content)  # type: ignore
+                        except Exception:
+                            hasher = None
+                try:
+                    fp.flush()
+                except Exception:
+                    pass
+            # Validate size if provided
+            try:
+                if expected_size is not None:
+                    if int(expected_size) != int(bytes_written):
+                        raise OSError("size_mismatch for {}: got {} expected {}".format(path, bytes_written, expected_size))
+            except Exception:
+                # If validation type casting fails, treat as mismatch
+                raise
+            # Validate hash if provided
+            if expected_sha256 and hasher:
+                try:
+                    digest = hasher.hexdigest()
+                except Exception:
+                    digest = None
+                if not digest or digest.lower() != str(expected_sha256).lower():
+                    raise OSError("sha256_mismatch for {}".format(path))
+            # Atomic-ish move into place
+            try:
+                # Remove existing file first if rename would fail on some FS variants
+                if self._exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                os.rename(tmp_path, path)
+            finally:
+                # If rename failed, try to clean temp to avoid clutter; ignore errors
+                if self._exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
         finally:
             try:
                 resp.close()

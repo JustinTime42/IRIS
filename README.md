@@ -34,6 +34,7 @@ Current implementation snapshot:
 
 MQTT topic design (abridged; see `design_doc.md` §4.1 for full tree):
 - `home/system/{device_id}/...` → update, status, sos, health, version
+  - status values now include: `running`, `update_received`, `updating`, `updated`, `alive`
 - `home/power/city/...` → status, heartbeat (city power presence)
 - `home/freezer/...` → temperature readings and door status/ajar time
 - `home/garage/...` → door status/commands, light status/commands, weather
@@ -46,6 +47,13 @@ Deployment overview:
 Status at a glance:
 - Implemented: Bootstrap files; shared WiFi/MQTT/config modules; deploy script; minimal `garage-controller` app; `house-monitor` scaffold
 - Planned: Full device logic (sensors/relays), server API+DB+alerts, mobile app, dashboard, advanced SOS/health analytics
+
+## Quick Commands
+
+See `COMMANDS.md` for copy-paste-ready commands to:
+- Monitor all MQTT topics
+- Restart Docker services/stack
+- Build the Android app (APK/AAB)
 
 ## Repository Structure
 
@@ -95,7 +103,11 @@ python deployment/scripts/deploy.py
 - Bootstrap loads `/config/device.json` and connects to WiFi/MQTT.
 - Publishes LWT, boot, version, and periodic health to MQTT.
 - Imports `app.main.main()` from `/app/main.py` and runs it.
-- Listens for update commands to refresh application files via HTTP.
+- Listens for update commands to refresh application files via HTTP and publishes OTA progress:
+  - `home/system/{device_id}/status` = `update_received` immediately when the command is received
+  - `home/system/{device_id}/status` = `updating` while applying files
+  - `home/system/{device_id}/status` = `updated` after a successful apply
+  - On errors, an SOS is published to `home/system/{device_id}/sos` with details
 
 ## Troubleshooting
 

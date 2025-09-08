@@ -6,7 +6,7 @@ Controls and monitors:
 - Flood light (relay)
 - Environmental sensors (BMP388 for temp/pressure, DS18B20 for freezer temp)
 
-Entry point: main()
+Entry point: init(runtime)
 """
 
 try:
@@ -52,7 +52,8 @@ class GarageController:
     """Main controller for garage door and related components.
 
     Attributes:
-        mqtt (shared.mqtt_client.Mqtt): MQTT client wrapper.
+        runtime: Bootstrap-provided runtime with publish/subscribe/sos APIs.
+        device_id (str): Device ID from config.
         led (machine.Pin): Built-in LED pin for heartbeat.
         door_relay (machine.Pin): Output to garage door relay.
         light_relay (machine.Pin): Output to flood light relay.
@@ -66,13 +67,13 @@ class GarageController:
         last_update (int): ms timestamp for periodic sensor update.
     """
     
-    def __init__(self, mqtt_client, device_id: str):
+    def __init__(self, runtime, device_id: str):
         """Initialize hardware and MQTT client.
 
         Args:
-            mqtt_client (shared.mqtt_client.Mqtt): Connected MQTT client wrapper.
+            runtime: Bootstrap-provided runtime with publish/subscribe/sos APIs.
         """
-        self.mqtt = mqtt_client
+        self.runtime = runtime
         self.device_id = device_id
         self._sos_topic = "home/system/{}/sos".format(self.device_id)
         self.led = Pin(LED_PIN, Pin.OUT)
@@ -95,6 +96,9 @@ class GarageController:
         self.bmp = None
         self._bmp_init_attempted = False
         self._bmp_next_retry_ms = 0  # next allowed attempt time in ticks_ms
+        # Track weather station (BMP388) read failures to avoid SOS spam
+        self._bmp_warned_no_read = False
+        self._bmp_no_read_last_ms = 0
         try:
             sda_ok = False
             scl_ok = False
@@ -148,21 +152,10 @@ class GarageController:
         self.last_door_state = self.get_door_state()
         self.last_light_state = self._read_light_state()
         
-        # Setup MQTT callbacks
-        # Reason: shared.mqtt_client.Mqtt exposes set_message_handler()
+        # Initial publishes for baseline state (app uses bootstrap-owned MQTT via runtime)
         try:
-            self.mqtt.set_message_handler(self.mqtt_callback)
-        except Exception:
-            pass
-        try:
-            self.mqtt.subscribe(TOPIC_DOOR_COMMAND)
-            self.mqtt.subscribe(TOPIC_LIGHT_COMMAND)
-        except Exception:
-            pass
-        # Publish initial states so subscribers have baseline
-        try:
-            self.mqtt.publish(TOPIC_DOOR_STATUS, self.last_door_state)
-            self.mqtt.publish(TOPIC_LIGHT_STATUS, 'on' if self.last_light_state else 'off')
+            self.runtime.publish(TOPIC_DOOR_STATUS, self.last_door_state)
+            self.runtime.publish(TOPIC_LIGHT_STATUS, 'on' if self.last_light_state else 'off')
         except Exception:
             pass
     
@@ -233,7 +226,7 @@ class GarageController:
             # Active-high: drive 1 to turn ON, 0 to turn OFF
             self.light_relay.value(1 if state else 0)
         self.last_light_state = state
-        self.mqtt.publish(TOPIC_LIGHT_STATUS, 'on' if state else 'off')
+        self.runtime.publish(TOPIC_LIGHT_STATUS, 'on' if state else 'off')
     
     def read_bmp388(self):
         """Read temperature and pressure from BMP388.
@@ -313,7 +306,7 @@ class GarageController:
                 body = json.dumps(payload)
             except Exception:
                 body = str(payload)
-            self.mqtt.publish(self._sos_topic, body)
+            self.runtime.publish(self._sos_topic, body)
         except Exception:
             # Never raise from SOS
             pass
@@ -374,7 +367,7 @@ class GarageController:
         # Update door state if changed
         door_state = self.get_door_state()
         if door_state != self.last_door_state:
-            self.mqtt.publish(TOPIC_DOOR_STATUS, door_state)
+            self.runtime.publish(TOPIC_DOOR_STATUS, door_state)
             self.last_door_state = door_state
             # Clear expected target once we hit terminal state
             if door_state in ('open', 'closed'):
@@ -385,13 +378,24 @@ class GarageController:
             # Read and publish weather data
             temp_f, pressure_inhg = self.read_bmp388()
             if temp_f is not None and pressure_inhg is not None:
-                self.mqtt.publish(TOPIC_WEATHER_TEMP, f"{temp_f:.1f}")
-                self.mqtt.publish(TOPIC_WEATHER_PRESSURE, f"{pressure_inhg:.2f}")
+                self.runtime.publish(TOPIC_WEATHER_TEMP, f"{temp_f:.1f}")
+                self.runtime.publish(TOPIC_WEATHER_PRESSURE, f"{pressure_inhg:.2f}")
+                # Reset warning flag on successful read
+                self._bmp_warned_no_read = False
+            else:
+                # If no reading available, emit a rate-limited SOS so we notice sensor outages
+                try:
+                    if (not self._bmp_warned_no_read) or (time.ticks_diff(current_time, self._bmp_no_read_last_ms) > 300000):  # 5 minutes
+                        self.sos("bmp388_no_reading", "No weather station reading (temperature/pressure); will retry")
+                        self._bmp_warned_no_read = True
+                        self._bmp_no_read_last_ms = current_time
+                except Exception:
+                    pass
             
             # Read and publish freezer temperature
             temp_f = self.read_ds18b20()
             if temp_f is not None:
-                self.mqtt.publish(TOPIC_FREEZER_TEMP, f"{temp_f:.1f}")
+                self.runtime.publish(TOPIC_FREEZER_TEMP, f"{temp_f:.1f}")
             
             self.last_update = current_time
             # Blink LED to show activity (portable across ports)
@@ -521,87 +525,61 @@ class GarageController:
         else:
             return v == 1
 
-def main():
-    """Main application loop.
+_controller = None
+_runtime = None
 
-    Loads MQTT configuration, connects, initializes `GarageController`, and
-    runs the main polling loop. Publishes a simple health heartbeat.
+def init(runtime):
+    """Initialize the app with the bootstrap-provided runtime.
+
+    Args:
+        runtime: Runtime API from bootstrap (publish/subscribe/sos/etc.).
 
     Returns:
         None
     """
-    # Load MQTT config
+    global _controller, _runtime
+    _runtime = runtime
     cfg = load_device_config()
     device_id = cfg.get("device_id") or "device-unknown"
-    host = cfg.get("mqtt_host") or ""
-    port = cfg.get("mqtt_port") or 1883
-    user = cfg.get("mqtt_user") or None
-    password = cfg.get("mqtt_password") or None
-
-    # Initialize MQTT client (shared wrapper)
-    from shared.mqtt_client import Mqtt
-    mqtt = Mqtt(host, port, user, password, client_id="{}-app".format(device_id))
-    # Try to connect; if not available, continue gracefully (bootstrap will keep system MQTT alive)
     try:
-        if mqtt.connect():
-            try:
-                print("[APP][MQTT] connected")
-            except Exception:
-                pass
+        print("[APP] init controller...")
+    except Exception:
+        pass
+    _controller = GarageController(runtime, device_id)
+    try:
+        print("[APP] controller ready")
+    except Exception:
+        pass
+    # Subscribe to command topics via runtime (fast path for low latency)
+    try:
+        runtime.subscribe(TOPIC_DOOR_COMMAND, lambda t, m: _controller.mqtt_callback(t, m), fast=True)
+        runtime.subscribe(TOPIC_LIGHT_COMMAND, lambda t, m: _controller.mqtt_callback(t, m), fast=True)
     except Exception:
         pass
 
-    # Initialize controller
+def tick():
+    """Periodic work slice. Must return quickly.
+
+    Returns:
+        None
+    """
+    global _controller
+    if _controller:
+        _controller.update_sensors()
+
+def shutdown(reason=""):
+    """Best-effort quiesce before OTA/reset.
+
+    Args:
+        reason (str): Reason for shutdown (e.g., 'update').
+
+    Returns:
+        None
+    """
+    global _runtime
     try:
-        try:
-            print("[APP] init controller...")
-        except Exception:
-            pass
-        controller = GarageController(mqtt, device_id)
-        try:
-            print("[APP] controller ready")
-        except Exception:
-            pass
-    except Exception as e:
-        # Surface the failure clearly and let bootstrap catch the exception
-        try:
-            print("[APP] controller init failed:", e)
-        except Exception:
-            pass
-        try:
-            # Minimal SOS without assuming mqtt wrapper shape
-            base = "home/system/{}/sos".format(device_id)
-            body = json.dumps({
-                "device_id": device_id,
-                "error": "controller_init_failed",
-                "message": str(e),
-                "timestamp": time.ticks_ms(),
-            })
-            mqtt.publish(base, body)
-        except Exception:
-            pass
-        raise
-
-    print("Garage controller started")
-
-    # App-level system health heartbeat (non-retained).
-    # Reason: While app runs, bootstrap loop is blocked; keep-alive here helps observability.
-    system_health_topic = "home/system/{}/health".format(device_id)
-    last_health = 0
-
-    # Main loop
-    while True:
-        try:
-            mqtt.check_msg()  # Check for incoming MQTT messages
-        except Exception:
-            pass
-        controller.update_sensors()
-        # Periodic health heartbeat (~30s)
-        try:
-            now = time.ticks_ms()
-            if now and (now - last_health) >= 30000:
-                last_health = now
-                mqtt.publish(system_health_topic, "online")
-        except Exception:
-            pass
-        time.sleep(0.1)  # Small delay to prevent tight loop
+        if _runtime:
+            _runtime.unsubscribe(TOPIC_DOOR_COMMAND)
+            _runtime.unsubscribe(TOPIC_LIGHT_COMMAND)
+    except Exception:
+        pass
