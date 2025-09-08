@@ -109,6 +109,41 @@ python deployment/scripts/deploy.py
   - Confirm the correct port is selected (e.g., `COM5` on Windows).
   - The deploy script now auto-resets and retries transfers, but persistent failures usually indicate the port is busy or the cable/port is unstable.
 
+## OTA Update Automation (Server-Driven)
+
+The server can now generate file manifests for a given `device_id` and publish them to the device's existing OTA topic without modifying the bootstrap. This implements the "Option A" flow where the server walks the repo to gather relevant files for the device.
+
+Environment variables:
+- `GITHUB_ORG` and `GITHUB_REPO`: used to construct GitHub raw URLs
+- `GITHUB_DEFAULT_REF` (default: `main`): default branch or commit SHA for manifests
+--OR-
+- `OTA_RAW_BASE`: if set, the server will build file URLs as `{OTA_RAW_BASE}/{ref}/{repo_path}` (useful for private repos via a proxy)
+- `PROJECT_ROOT`: optional override of the repo root path for server discovery (defaults to project root)
+
+Endpoints:
+- `GET /api/devices/{device_id}/update/manifest?ref=<branch-or-sha>`
+  - Returns a JSON payload `{ files: [ { url, path }, ... ] }`
+  - Includes `devices/{device_id}/app/**` mapped to `app/**` and `shared/**` mapped to `shared/**`
+- `POST /api/devices/{device_id}/update` with body `{ "ref": "<branch-or-sha>" }`
+  - Publishes the same manifest to `home/system/{device_id}/update` via MQTT
+
+Example (preview manifest):
+```bash
+curl "http://localhost:8000/api/devices/garage-controller/update/manifest?ref=main"
+```
+
+Example (trigger OTA publish):
+```bash
+curl -X POST "http://localhost:8000/api/devices/garage-controller/update" \
+  -H "Content-Type: application/json" \
+  -d '{"ref":"main"}'
+```
+
+Notes:
+- The Pico W bootstrap still only accepts the standard manifest payload with `files: [ { url, path } ]` and applies app-layer files. It will ignore bootstrap paths.
+- Use a commit SHA in `ref` for reproducible deployments.
+- For private repos, set `OTA_RAW_BASE` to a server proxy that serves raw bytes to the device.
+
 ## Mobile App (Android / Expo)
 
 The React Native app lives in `android/app/`. See design at `android/APP_DESIGN.md`.

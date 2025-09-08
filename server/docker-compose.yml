@@ -53,6 +53,9 @@ services:
       - ./api:/app/api
       - ./logs:/app/logs
       - ./database:/app/database
+      # Mount repo directories so API can enumerate OTA files
+      - ../devices:/app/devices:ro
+      - ../shared:/app/shared:ro
 
   # Database (PostgreSQL)
   db:

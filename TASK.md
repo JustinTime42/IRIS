@@ -127,10 +127,14 @@ The LLM can automatically update and create tasks as needed.
   - [x] Scaffold theme engine (tokens, registry, Paper/Nav mappers, provider)
   - [x] Add Settings screen with runtime theme switching
   - [ ] Add visual primitives (AppCard/AppButton) to simplify radical theming
+    - [x] AppButton: theme-aware button with Jarvis glow + Retro pixel style; states (idle/pending/success/error) (2025-09-07)
+    - [x] Integrated AppButton on HomeScreen and DevicesScreen replacing Paper Button where appropriate (2025-09-07)
+    - [ ] AppCard: theme-aware card surfaces (glass/blur for Jarvis; CRT look for Retro)
   - [ ] Implement Retro (Green/Amber) effects (scanlines, pixel borders)
   - [ ] Implement Jarvis effects (glass/blur, glow accents)
   - [ ] Persist theme selection and support System (Auto)
   - [x] Jarvish theme polish pass: removed "Command Center" header; replaced flood light status with bulb icon and garage door with custom glyph (2025-08-30)
+  - [ ] Jarvis action feedback: button animations for clicked → waiting → response (success/error), tie to command lifecycle
 
 - [ ] Implement FCM integration
   - [ ] Set up Firebase project
@@ -234,6 +238,12 @@ The LLM can automatically update and create tasks as needed.
   - [ ] Implement update management
   - [ ] Create SOS management endpoints
   - [x] Add DB health endpoint (`GET /db/health`) (2025-08-24)
+  - [x] Server: Added OTA automation endpoints to generate and publish device update manifests (Option A) (2025-09-06)
+  - New endpoints:
+    - `GET /api/devices/{device_id}/update/manifest?ref=<ref>` (preview manifest)
+    - `POST /api/devices/{device_id}/update` with `{ "ref": "<ref>" }` (publish to `home/system/{device_id}/update`)
+  - Walks `devices/{device_id}/app/**` → `app/**` and `shared/**` → `shared/**`
+  - Supports GitHub raw URLs via `GITHUB_ORG`/`GITHUB_REPO` or proxy via `OTA_RAW_BASE`
 
 - [ ] Implement WebSocket channels
   - [ ] Create real-time status updates
@@ -377,6 +387,7 @@ The LLM can automatically update and create tasks as needed.
   - Introduced `useLightState()` and `api.getLightState()` to fetch/display current light state
 
 - [x] Documentation: Added wiring overview and CAT5 (T568B) mapping for weather station to `devices/garage-controller/PINOUT.md` (2025-08-29)
+- [x] Documentation: Updated Weather Station CAT5 mapping to align with BMP388 pin order while preserving SDA/SCL-to-GND twisted pairs; added rationale and notes in `devices/garage-controller/PINOUT.md` (2025-09-06)
 
 ## Discovered During Work
 - [x] Harden deployment script mpremote interactions with reset + retries to mitigate "could not enter raw repl" errors (2025-08-15)

@@ -36,6 +36,8 @@ DS18B20_PIN = 8
 I2C_SDA = 6
 I2C_SCL = 7
 LED_PIN = 'LED'  # Built-in LED
+# Active-low configuration for flood light relay: many modules energize on logic 0
+LIGHT_RELAY_ACTIVE_LOW = True
 
 # MQTT Topics (from design_doc.md)
 TOPIC_DOOR_STATUS = 'home/garage/door/status'
@@ -77,7 +79,7 @@ class GarageController:
         
         # Initialize relays
         self.door_relay = Pin(GARAGE_DOOR_RELAY, Pin.OUT, value=0)  # Active high
-        self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=0)  # Active high
+        self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=(1 if LIGHT_RELAY_ACTIVE_LOW else 0))  # Off by default
         
         # Initialize door sensors with pull-ups
         self.door_open_sw = Pin(DOOR_OPEN_SW, Pin.IN, Pin.PULL_UP)
@@ -144,6 +146,7 @@ class GarageController:
         self.last_update = 0
         # Now compute the true initial state
         self.last_door_state = self.get_door_state()
+        self.last_light_state = self._read_light_state()
         
         # Setup MQTT callbacks
         # Reason: shared.mqtt_client.Mqtt exposes set_message_handler()
@@ -223,7 +226,12 @@ class GarageController:
         Args:
             state (bool): True to turn on, False to turn off.
         """
-        self.light_relay.value(1 if state else 0)
+        if LIGHT_RELAY_ACTIVE_LOW:
+            # Active-low: drive 0 to turn ON, 1 to turn OFF
+            self.light_relay.value(0 if state else 1)
+        else:
+            # Active-high: drive 1 to turn ON, 0 to turn OFF
+            self.light_relay.value(1 if state else 0)
         self.last_light_state = state
         self.mqtt.publish(TOPIC_LIGHT_STATUS, 'on' if state else 'off')
     
@@ -496,6 +504,22 @@ class GarageController:
         except Exception:
             # If ticks_add not available, fall back to immediate retry later
             self._bmp_next_retry_ms = 0
+
+    def _read_light_state(self):
+        """Return True if flood light is currently ON based on relay output level.
+
+        Returns:
+            bool: True if light is ON, False otherwise.
+        """
+        try:
+            v = self.light_relay.value()
+        except Exception:
+            # If pin read fails, assume OFF for safety
+            v = (1 if LIGHT_RELAY_ACTIVE_LOW else 0)
+        if LIGHT_RELAY_ACTIVE_LOW:
+            return v == 0
+        else:
+            return v == 1
 
 def main():
     """Main application loop.

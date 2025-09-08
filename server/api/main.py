@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import uvicorn
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import paho.mqtt.client as mqtt
 import json
 import os
@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
+from pathlib import Path
+
 """
 Database imports: handle both package and direct execution contexts.
 """
@@ -125,6 +127,47 @@ MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "localhost")
 MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
+
+# OTA Repo Settings
+# If OTA_RAW_BASE is set, it should include the trailing ref or path prefix as needed.
+# Otherwise, we build raw GitHub URLs using ORG/REPO and ref.
+OTA_RAW_BASE = os.getenv("OTA_RAW_BASE", "").rstrip("/")  # e.g., https://your-server/ota/raw
+GITHUB_ORG = os.getenv("GITHUB_ORG", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "")
+GITHUB_DEFAULT_REF = os.getenv("GITHUB_DEFAULT_REF", "main")
+
+# Repository root resolution
+def _resolve_project_root() -> Path:
+    """Resolve the monorepo root path.
+
+    Order:
+    1) PROJECT_ROOT env var (if exists)
+    2) Walk up from this file to find a directory that has both 'devices/' and 'shared/'
+    3) Fallback to parent of the 'api' directory (../) or current parent
+    """
+    env_root = os.getenv("PROJECT_ROOT")
+    if env_root:
+        p = Path(env_root).resolve()
+        if p.exists():
+            return p
+    here = Path(__file__).resolve()
+    # Iterate safely over available parents only
+    for cand in here.parents:
+        try:
+            if (cand / "devices").exists() and (cand / "shared").exists():
+                return cand
+        except Exception:
+            # Ignore unexpected FS errors and continue searching
+            pass
+    # Fallback: parent of api dir if present
+    try:
+        api_parent = here.parent.parent if here.parent.name == "api" else here.parent
+        return api_parent
+    except Exception:
+        return here.parent
+
+PROJECT_ROOT = _resolve_project_root()
+logger.debug(f"Resolved PROJECT_ROOT to {PROJECT_ROOT}")
 
 # Device Status Models
 class DeviceStatus(str, Enum):
@@ -487,6 +530,148 @@ async def set_garage_light_state(state: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Device Management Endpoints
+
+class OTAUpdateRequest(BaseModel):
+    """Request body for triggering an OTA update.
+    
+    Attributes:
+        ref (str | None): Git ref to retrieve files from (branch or commit SHA). Defaults to env default.
+    """
+    ref: Optional[str] = None
+
+def _iter_device_files(device_id: str) -> list[Tuple[str, str]]:
+    """Enumerate repo file paths that should be deployed for a device.
+    
+    Args:
+        device_id (str): Target device identifier.
+    
+    Returns:
+        list[tuple[str, str]]: Tuples of (repo_path, device_path).
+    """
+    results: list[Tuple[str, str]] = []
+    # Include device-specific app files
+    device_app_dir = PROJECT_ROOT / "devices" / device_id / "app"
+    if device_app_dir.is_dir():
+        for p in device_app_dir.rglob("*"):
+            if p.is_file() and _include_in_ota(p):
+                rel = p.relative_to(PROJECT_ROOT).as_posix()
+                # Map devices/{device_id}/app/<...> -> app/<...>
+                sub = p.relative_to(device_app_dir).as_posix()
+                results.append((rel, f"app/{sub}"))
+    # Include shared modules
+    shared_dir = PROJECT_ROOT / "shared"
+    if shared_dir.is_dir():
+        for p in shared_dir.rglob("*"):
+            if p.is_file() and _include_in_ota(p):
+                rel = p.relative_to(PROJECT_ROOT).as_posix()
+                sub = p.relative_to(shared_dir).as_posix()
+                results.append((rel, f"shared/{sub}"))
+    return results
+
+def _include_in_ota(path: Path) -> bool:
+    """Return True if the file path should be included in OTA manifests.
+    
+    Excludes caches and bootstrap files by convention.
+    """
+    name = path.name
+    if name in {".DS_Store", "Thumbs.db"}:
+        return False
+    if name.endswith((".pyc", ".pyo")):
+        return False
+    parts = set(path.parts)
+    if "__pycache__" in parts:
+        return False
+    # Guard: never include bootstrap files
+    try:
+        rel = path.relative_to(PROJECT_ROOT).as_posix()
+    except Exception:
+        rel = path.as_posix()
+    if rel.startswith("devices/bootstrap/"):
+        return False
+    if name in {"main.py", "bootstrap_manager.py", "http_updater.py"} and path.parent == PROJECT_ROOT:
+        return False
+    return True
+
+def _raw_url_for(repo_path: str, ref: str) -> str:
+    """Construct a raw URL for a given repo path and ref.
+    
+    If OTA_RAW_BASE is configured, use it as base (server proxy). Otherwise use GitHub raw URLs.
+    """
+    if OTA_RAW_BASE:
+        # Expect server to accept /<ref>/<path> or similar; keep simple: base + /<ref>/<repo_path>
+        return f"{OTA_RAW_BASE}/{ref}/{repo_path}"
+    if not (GITHUB_ORG and GITHUB_REPO):
+        raise RuntimeError("GITHUB_ORG and GITHUB_REPO must be set or OTA_RAW_BASE provided")
+    return f"https://raw.githubusercontent.com/{GITHUB_ORG}/{GITHUB_REPO}/{ref}/{repo_path}"
+
+def _build_update_manifest(device_id: str, ref: Optional[str]) -> Dict[str, Any]:
+    """Build the OTA update payload for a device.
+    
+    Args:
+        device_id (str): Target device id.
+        ref (str | None): Branch name or commit SHA. Defaults to env.
+    
+    Returns:
+        dict: Payload with "files" list containing url/path entries.
+    """
+    use_ref = (ref or GITHUB_DEFAULT_REF).strip()
+    entries: list[Dict[str, str]] = []
+    for repo_path, device_path in _iter_device_files(device_id):
+        entries.append({
+            "url": _raw_url_for(repo_path, use_ref),
+            "path": device_path,
+        })
+    if not entries:
+        logger.error("OTA manifest empty for device_id=%s at PROJECT_ROOT=%s (ref=%s)", device_id, str(PROJECT_ROOT), use_ref)
+        raise HTTPException(status_code=404, detail=f"No deployable files found for device_id='{device_id}' at PROJECT_ROOT='{PROJECT_ROOT}'")
+    logger.debug(f"Built OTA manifest for device_id={device_id} with {len(entries)} files")
+    return {"files": entries}
+
+@app.get("/api/devices/{device_id}/update/manifest")
+async def get_update_manifest(device_id: str, ref: Optional[str] = None):
+    """Preview the OTA manifest for a device without publishing.
+    
+    Args:
+        device_id (str): Target device id.
+        ref (str | None): Branch or commit SHA.
+    
+    Returns:
+        dict: Update payload with file list.
+    """
+    try:
+        return _build_update_manifest(device_id, ref)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to build manifest for {device_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/devices/{device_id}/update")
+async def trigger_device_update(device_id: str, req: OTAUpdateRequest):
+    """Trigger OTA update for a device by publishing a generated manifest to MQTT.
+    
+    Args:
+        device_id (str): Target device id.
+        req (OTAUpdateRequest): Optional ref for code version to use.
+    
+    Returns:
+        dict: Publish status and file count.
+    """
+    # Ensure MQTT client is connected
+    if not hasattr(app.state, 'mqtt_client') or not app.state.mqtt_client.is_connected():
+        raise HTTPException(status_code=503, detail="MQTT client not connected")
+
+    try:
+        payload = _build_update_manifest(device_id, req.ref)
+        topic = f"home/system/{device_id}/update"
+        sent = app.state.mqtt_client.publish(topic, json.dumps(payload))
+        logger.info("Published OTA update for %s with %d files (ref=%s)", device_id, len(payload.get("files", [])), (req.ref or GITHUB_DEFAULT_REF))
+        return {"status": "published", "device_id": device_id, "file_count": len(payload.get("files", [])), "ref": req.ref or GITHUB_DEFAULT_REF, "mqtt_result": getattr(sent, 'rc', 0)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to publish OTA for {device_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/devices", response_model=Dict[str, DeviceInfo])
 async def list_devices():

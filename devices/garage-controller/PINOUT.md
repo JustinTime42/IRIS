@@ -89,28 +89,28 @@
 
 Purpose: carry power (3V3/GND) and I2C bus (SDA GP6, SCL GP7) to the BMP388 breakout in the weather enclosure, with one spare twisted pair reserved for future sensors.
 
-Recommended mapping (signals paired with ground to reduce noise):
+Updated mapping to align with BMP388 pin order (left-to-right on breakout): `INT, CS, SDI(SDA), SDO(GND), SCK(SCL), GND, 3Vo, VIN`. Signals are arranged to minimize crossing in the tight enclosure while keeping I2C lines twisted with ground for integrity.
 
 | RJ45 Pin | Wire Color (T568B) | Assignment | Notes |
 |---------:|---------------------|------------|-------|
-| 1 | White/Orange | SCL (GP7) | I2C clock |
-| 2 | Orange | GND | Pair with SCL (twisted orange pair) |
+| 1 | White/Orange | INT (unused) | Leave unconnected at breakout |
+| 2 | Orange | CS → 3V3 | Tie CS to 3.3V for I2C mode |
 | 3 | White/Green | SDA (GP6) | I2C data |
-| 4 | Blue | 3V3 | Power to sensors |
-| 5 | White/Blue | GND | Power return (twisted blue pair) |
-| 6 | Green | GND | Pair with SDA (twisted green pair pins 3/6) |
-| 7 | White/Brown | Spare | Reserve for future sensor/IO |
-| 8 | Brown | Spare | Reserve for future sensor/IO |
+| 4 | Blue | SDO → GND | Strap SDO to GND (I2C addr 0x76) |
+| 5 | White/Blue | SCL (GP7) | I2C clock |
+| 6 | Green | GND | Sensor ground |
+| 7 | White/Brown | 3Vo (unused) | Leave unconnected |
+| 8 | Brown | VIN → 3V3 | 3.3V power input to breakout |
 
 Notes:
-- Keep I2C bus length reasonable; for CAT5 runs, target ≤5–10 m and set bus speed conservatively (100 kHz or lower) if needed.
-- Ensure I2C pull-ups are present on SDA/SCL at the weather-end. Many BMP388/BMP280 breakouts include 10k pull-ups; add/adjust to ~4.7k if signal integrity requires it.
-- Power budget: 3.3V over long CAT5 runs can drop; verify voltage at the sensor under load.
-- BMP388 wiring recap (I2C mode) per this design: `SDI→SDA (GP6)`, `SCK→SCL (GP7)`, `SDO→GND (addr 0x76)`, `CS→3V3`, `VIN→3V3`, `GND→GND` (see Sensors section above).
- - Twisted-pair optimization summary: 1–2 (orange) = SCL+GND, 3–6 (green) = SDA+GND, 4–5 (blue) = 3V3+GND. This minimizes loop area and crosstalk.
+- SDA (pin 3) is twisted with GND (pin 6) on the green pair (3/6), and SCL (pin 5) is twisted with GND (pin 4) on the blue pair (4/5). This preserves tight return paths for the I2C signals to reduce noise and crosstalk in the harness.
+- CS is held high (to 3.3V) and SDO is grounded at the breakout to force I2C mode and select address 0x76.
+- INT and 3Vo are not used; cap them neatly to avoid stray whiskers.
+- Power budget: with VIN (3.3V) on pin 8 and grounds on pins 4 and 6, return current has short paths, though VIN is paired with 3Vo rather than a ground due to the pin-order constraint. For short runs this is fine.
+- If you observe power noise on longer runs, consider this alternative swap to make a true power/ground pair at the expense of a slight crossover at the header: swap 7↔6 at the RJ45 (making 7=GND, 6=3Vo/unused). That yields 7–8 = GND+3V3 as a twisted power pair while keeping SDA (3) paired to GND (now on 6). Re-check the physical header routing before committing.
+- Keep I2C speed conservative (≤100 kHz) for longer CAT5 runs. Ensure pull-ups are present on the breakout (often 10k). If edges look soft, strengthen pull-ups to ~4.7k.
 
-Cable termination:
-- If not using RJ45 connectors, still follow the T568B color mapping for consistency. Twist the assigned signal with its paired ground to maintain the benefits of the twisted pair.
+Twisted-pair optimization summary (after update): 3–6 (green) = SDA+GND, 4–5 (blue) = GND+SCL, 1–2 (orange) = INT+CS, 7–8 (brown) = 3Vo+VIN.
 
 ## CAT5 Wiring - DS18B20 and Reed Switches
 
