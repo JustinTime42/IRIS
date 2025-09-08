@@ -504,7 +504,7 @@ class BootstrapManager:
             "error": error_type,
             "message": message,
             # details omitted in bootstrap; reserved for future use
-            "timestamp": self._now_ms(),
+            "timestamp42": self._now_ms(),
             "device_id": self.device_id,
         }
         topic = "home/system/{}/sos".format(self.device_id)
