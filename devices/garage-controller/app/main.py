@@ -386,7 +386,7 @@ class GarageController:
                 # If no reading available, emit a rate-limited SOS so we notice sensor outages
                 try:
                     if (not self._bmp_warned_no_read) or (time.ticks_diff(current_time, self._bmp_no_read_last_ms) > 300000):  # 5 minutes
-                        self.sos("bmp388_no_reading", "No weather station reading (temperature/pressure); will retry")
+                        self.sos("bmp388_no_reading", "No weather station reading (temperature/pressure)")
                         self._bmp_warned_no_read = True
                         self._bmp_no_read_last_ms = current_time
                 except Exception:
