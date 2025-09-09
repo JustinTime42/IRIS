@@ -96,7 +96,7 @@ export default function HomeScreen() {
             ? '—'
             : `${fmt((weather as any).temperature_f, 1)} °F | ${fmt((weather as any).pressure_inhg, 2)} inHg`
         }
-        onPress={() => nav.navigate('History')}
+        onPress={() => nav.navigate('Weather')}
       />
 
       {/* Freezer (Garage) and House Freezer side-by-side */}

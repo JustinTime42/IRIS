@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Dict, List, Optional
 from pathlib import Path
 import hashlib
+import requests
 from dateutil import parser as dateutil_parser  # type: ignore
 
 """
@@ -700,27 +701,40 @@ def _build_update_manifest(device_id: str, ref: Optional[str]) -> Dict[str, Any]
     use_ref = (ref or GITHUB_DEFAULT_REF).strip()
     entries: list[Dict[str, Any]] = []
     
-    def _size_and_sha256(abs_path: Path) -> Tuple[int, str]:
+    def _fetch_github_content_hash(repo_path: str, ref: str) -> Tuple[int, str]:
+        """Fetch content from GitHub and calculate its hash - ensuring consistency with what devices download.
+        
+        Args:
+            repo_path (str): Repository path to fetch
+            ref (str): Git reference (branch/commit)
+            
+        Returns:
+            tuple[int, str]: (size, sha256_hex)
+        """
         try:
-            size = abs_path.stat().st_size
-        except Exception:
-            size = 0
-        sha = ""
-        try:
-            h = hashlib.sha256()
-            with open(abs_path, "rb") as fp:
-                for chunk in iter(lambda: fp.read(65536), b""):
-                    if not chunk:
-                        break
-                    h.update(chunk)
-            sha = h.hexdigest()
-        except Exception:
-            sha = ""
-        return size, sha
+            url = _raw_url_for(repo_path, ref)
+            logger.debug(f"Fetching content from {url} for hash calculation")
+            
+            # Use a reasonable timeout to avoid hanging
+            response = requests.get(url, timeout=30)
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch {url} (status {response.status_code})")
+                return 0, ""
+            
+            content = response.content
+            size = len(content)
+            sha256_hash = hashlib.sha256(content).hexdigest()
+            
+            logger.debug(f"GitHub content hash for {repo_path}: {sha256_hash} ({size} bytes)")
+            return size, sha256_hash
+            
+        except Exception as e:
+            logger.warning(f"Failed to fetch GitHub content for {repo_path}: {e}")
+            return 0, ""
     
     for repo_path, device_path in _iter_device_files(device_id):
-        abs_path = PROJECT_ROOT / repo_path
-        size, sha = _size_and_sha256(abs_path)
+        # Calculate hash from GitHub content instead of local files
+        size, sha = _fetch_github_content_hash(repo_path, use_ref)
         entry: Dict[str, Any] = {
             "url": _raw_url_for(repo_path, use_ref),
             "path": device_path,
