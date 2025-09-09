@@ -161,6 +161,40 @@ class SensorReading(Base):
     )
 
 
+class DeviceLog(Base):
+    """
+    Detailed device logging for crash analysis and debugging.
+
+    Attributes:
+        id (int): Auto-increment primary key.
+        device_id (str): FK to devices.device_id.
+        level (str): Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        component (str): Component that generated the log (bootstrap, app, wifi, mqtt, sensors).
+        message (str): Log message.
+        details (JSON): Additional structured data (stack trace, system stats, etc.).
+        device_timestamp (int): Device-local timestamp in ms (ticks_ms).
+        sequence (int): Sequence number for ordering logs from same device.
+    """
+
+    __tablename__ = "device_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    device_id: Mapped[str] = mapped_column(String(64), ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=False)
+    level: Mapped[str] = mapped_column(String(16), nullable=False)  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    component: Mapped[str] = mapped_column(String(32), nullable=False)  # bootstrap, app, wifi, mqtt, sensors, etc.
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[Optional[dict]] = mapped_column(JSON)
+    device_timestamp: Mapped[Optional[int]] = mapped_column(Integer)  # Device ticks_ms for correlation
+    sequence: Mapped[Optional[int]] = mapped_column(Integer)  # Sequence number from device
+
+    __table_args__ = (
+        CheckConstraint("level IN ('DEBUG','INFO','WARNING','ERROR','CRITICAL')", name="ck_log_level"),
+        Index("ix_device_logs_device_time", "device_id", "created_at"),
+        Index("ix_device_logs_level_time", "level", "created_at"),
+        Index("ix_device_logs_component", "component", "created_at"),
+    )
+
+
 class SystemEvent(Base):
     """
     System-wide events such as power outages or server changes.

@@ -7,6 +7,7 @@ import DevicesScreen from '../screens/DevicesScreen';
 import { View, ScrollView, Dimensions } from 'react-native';
 import { useWeatherHistory } from '../hooks/useGarage';
 import Svg, { Path, G, Line } from 'react-native-svg';
+import { Ionicons } from '@expo/vector-icons';
 
 const Tab = createBottomTabNavigator();
 
@@ -94,16 +95,45 @@ export default function RootNavigator() {
 
   return (
     <Tab.Navigator
-      screenOptions={{
+      screenOptions={({ route }) => ({
         headerShown: false,
         tabBarActiveTintColor: theme.colors.primary,
-        tabBarStyle: { backgroundColor: theme.colors.surface },
-      }}
+        tabBarInactiveTintColor: theme.colors.onSurface,
+        tabBarStyle: { 
+          backgroundColor: theme.colors.surface,
+          borderTopColor: theme.colors.outline,
+        },
+        tabBarIcon: ({ focused, color, size }) => {
+          let iconName: keyof typeof Ionicons.glyphMap;
+
+          switch (route.name) {
+            case 'Home':
+              iconName = focused ? 'home' : 'home-outline';
+              break;
+            case 'Devices':
+              iconName = focused ? 'hardware-chip' : 'hardware-chip-outline';
+              break;
+            case 'SOS':
+              iconName = focused ? 'warning' : 'warning-outline';
+              break;
+            case 'Weather':
+              iconName = focused ? 'partly-sunny' : 'partly-sunny-outline';
+              break;
+            case 'Settings':
+              iconName = focused ? 'settings' : 'settings-outline';
+              break;
+            default:
+              iconName = 'ellipse-outline';
+          }
+
+          return <Ionicons name={iconName} size={size} color={color} />;
+        },
+      })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       <Tab.Screen name="Devices" component={DevicesScreen} />
       <Tab.Screen name="SOS" children={() => <Placeholder title="SOS" />} />
-      <Tab.Screen name="History" component={WeatherHistoryScreen} />
+      <Tab.Screen name="Weather" component={WeatherHistoryScreen} />
       <Tab.Screen name="Settings" component={SettingsScreen} />
     </Tab.Navigator>
   );

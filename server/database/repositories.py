@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import select, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Device, DeviceBoot, SensorReading, SOSIncident
+from .models import Device, DeviceBoot, SensorReading, SOSIncident, DeviceLog
 
 
 async def upsert_device(
@@ -220,3 +220,114 @@ async def get_weather_history(
             "pressure_inhg": float(pressure_inhg) if pressure_inhg is not None else None,
         })
     return rows
+
+
+async def create_device_log(
+    session: AsyncSession,
+    *,
+    device_id: str,
+    level: str,
+    component: str,
+    message: str,
+    details: Optional[dict] = None,
+    device_timestamp: Optional[int] = None,
+    sequence: Optional[int] = None,
+) -> DeviceLog:
+    """Insert a device log entry for debugging and crash analysis.
+    
+    Args:
+        session (AsyncSession): DB session
+        device_id (str): Device ID
+        level (str): Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        component (str): Component that generated the log
+        message (str): Log message
+        details (Optional[dict]): Additional structured data
+        device_timestamp (Optional[int]): Device-local timestamp in ms
+        sequence (Optional[int]): Sequence number from device
+        
+    Returns:
+        DeviceLog: The persisted log entry
+    """
+    log_entry = DeviceLog(
+        device_id=device_id,
+        level=level.upper(),
+        component=component,
+        message=message,
+        details=details,
+        device_timestamp=device_timestamp,
+        sequence=sequence,
+    )
+    session.add(log_entry)
+    await session.commit()
+    await session.refresh(log_entry)
+    return log_entry
+
+
+async def get_device_logs(
+    session: AsyncSession,
+    *,
+    device_id: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    level: Optional[str] = None,
+    component: Optional[str] = None,
+    limit: int = 100,
+) -> list[DeviceLog]:
+    """Retrieve device logs with optional filtering.
+    
+    Args:
+        session (AsyncSession): DB session
+        device_id (str): Device ID to get logs for
+        start (Optional[datetime]): Start time filter
+        end (Optional[datetime]): End time filter
+        level (Optional[str]): Log level filter
+        component (Optional[str]): Component filter
+        limit (int): Maximum number of logs to return
+        
+    Returns:
+        list[DeviceLog]: List of matching log entries ordered by creation time desc
+    """
+    query = select(DeviceLog).where(DeviceLog.device_id == device_id)
+    
+    if start:
+        query = query.where(DeviceLog.created_at >= start)
+    if end:
+        query = query.where(DeviceLog.created_at <= end)
+    if level:
+        query = query.where(DeviceLog.level == level.upper())
+    if component:
+        query = query.where(DeviceLog.component == component)
+        
+    query = query.order_by(DeviceLog.created_at.desc()).limit(limit)
+    
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_device_crash_logs(
+    session: AsyncSession,
+    *,
+    device_id: str,
+    hours_back: int = 24,
+) -> list[DeviceLog]:
+    """Get logs that might indicate device crashes or issues.
+    
+    Args:
+        session (AsyncSession): DB session
+        device_id (str): Device ID
+        hours_back (int): Hours to look back from now
+        
+    Returns:
+        list[DeviceLog]: Error and critical logs that might indicate crashes
+    """
+    from datetime import timedelta
+    start_time = datetime.utcnow() - timedelta(hours=hours_back)
+    
+    query = select(DeviceLog).where(
+        DeviceLog.device_id == device_id,
+        DeviceLog.created_at >= start_time,
+        DeviceLog.level.in_(['ERROR', 'CRITICAL'])
+    ).order_by(DeviceLog.created_at.desc()).limit(50)
+    
+    result = await session.execute(query)
+    return list(result.scalars().all())

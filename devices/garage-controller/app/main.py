@@ -11,8 +11,10 @@ Entry point: init(runtime)
 
 try:
     import time
+    import gc
 except Exception:
     import sys as time  # type: ignore
+    import sys as gc  # type: ignore
 try:
     import machine
 except Exception:
@@ -22,6 +24,7 @@ import ds18x20
 from machine import Pin, I2C
 import bmp3xx  # Provided in shared/vendor and deployed to /lib
 from shared.config_manager import load_device_config
+from shared.device_logger import DeviceLogger, set_global_logger
 try:
     import ujson as json  # type: ignore
 except Exception:
@@ -76,11 +79,41 @@ class GarageController:
         self.runtime = runtime
         self.device_id = device_id
         self._sos_topic = "home/system/{}/sos".format(self.device_id)
-        self.led = Pin(LED_PIN, Pin.OUT)
         
-        # Initialize relays
-        self.door_relay = Pin(GARAGE_DOOR_RELAY, Pin.OUT, value=0)  # Active high
-        self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=(1 if LIGHT_RELAY_ACTIVE_LOW else 0))  # Off by default
+        # Initialize enhanced logging
+        try:
+            self.logger = DeviceLogger(runtime, device_id, min_level='INFO')
+            set_global_logger(self.logger)
+            self.logger.info("app", "Garage controller initializing", {
+                "version": "2.0.0",
+                "features": ["door_control", "flood_light", "weather_sensors", "freezer_monitor"],
+                "pin_config": {
+                    "door_relay": GARAGE_DOOR_RELAY,
+                    "light_relay": FLOOD_LIGHT_RELAY,
+                    "door_switches": [DOOR_OPEN_SW, DOOR_CLOSED_SW],
+                    "ds18b20": DS18B20_PIN,
+                    "i2c": [I2C_SDA, I2C_SCL]
+                }
+            })
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize logger: {e}")
+            self.logger = None
+        
+        try:
+            self.led = Pin(LED_PIN, Pin.OUT)
+            self.log_info("hardware", "LED initialized", {"pin": LED_PIN})
+            
+            # Initialize relays
+            self.door_relay = Pin(GARAGE_DOOR_RELAY, Pin.OUT, value=0)  # Active high
+            self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=(1 if LIGHT_RELAY_ACTIVE_LOW else 0))  # Off by default
+            self.log_info("hardware", "Relays initialized", {
+                "door_relay": GARAGE_DOOR_RELAY, 
+                "light_relay": FLOOD_LIGHT_RELAY,
+                "light_active_low": LIGHT_RELAY_ACTIVE_LOW
+            })
+        except Exception as e:
+            self.log_error("hardware", "Failed to initialize relays", {"error": str(e)})
+            raise
         
         # Initialize door sensors with pull-ups
         self.door_open_sw = Pin(DOOR_OPEN_SW, Pin.IN, Pin.PULL_UP)
@@ -129,14 +162,69 @@ class GarageController:
             # Ignore diagnostics errors
             pass
         
+        # Initialize door sensors
+        try:
+            self.door_open_sw = Pin(DOOR_OPEN_SW, Pin.IN, Pin.PULL_UP)
+            self.door_closed_sw = Pin(DOOR_CLOSED_SW, Pin.IN, Pin.PULL_UP)
+            self.log_info("hardware", "Door sensors initialized", {
+                "open_switch": DOOR_OPEN_SW,
+                "closed_switch": DOOR_CLOSED_SW
+            })
+        except Exception as e:
+            self.log_error("hardware", "Failed to initialize door sensors", {"error": str(e)})
+            raise
+
+        # Initialize BMP388 I2C diagnostics
+        self.bmp = None
+        self._bmp_init_attempted = False
+        self._bmp_next_retry_ms = 0
+        self._bmp_warned_no_read = False
+        self._bmp_no_read_last_ms = 0
+        
+        try:
+            # Check I2C line states
+            sda_ok = bool(Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value())
+            scl_ok = bool(Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value())
+
+            # Scan for I2C devices
+            addrs = []
+            try:
+                _di = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
+                time.sleep_ms(10)
+                addrs = _di.scan()
+            except Exception as scan_e:
+                self.log_warning("sensors", "I2C scan failed", {"error": str(scan_e)})
+
+            self.log_info("sensors", "I2C diagnostics completed", {
+                "sda_ok": sda_ok,
+                "scl_ok": scl_ok,
+                "devices_found": [hex(a) for a in addrs],
+                "bmp388_present": (0x76 in addrs or 0x77 in addrs)
+            })
+            
+            # Schedule BMP388 init attempt
+            try:
+                self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
+            except Exception:
+                self._bmp_next_retry_ms = 0
+                
+        except Exception as e:
+            self.log_error("sensors", "I2C diagnostics failed", {"error": str(e)})
+
         # Initialize DS18B20
         self.ds_pin = Pin(DS18B20_PIN)
         try:
             self.ds_sensor = ds18x20.DS18X20(onewire.OneWire(self.ds_pin))
             self.ds_roms = self.ds_sensor.scan()
+            self.log_info("sensors", "DS18B20 initialized", {
+                "pin": DS18B20_PIN,
+                "devices_found": len(self.ds_roms),
+                "roms": [":".join(["{:02x}".format(b) for b in rom]) for rom in self.ds_roms]
+            })
         except Exception as e:
             self.ds_sensor = None
             self.ds_roms = []
+            self.log_error("sensors", "DS18B20 initialization failed", {"error": str(e)})
             try:
                 self.sos("ds18b20_init_failed", "{}".format(e))
             except Exception:
@@ -524,6 +612,37 @@ class GarageController:
             return v == 0
         else:
             return v == 1
+
+    # Logging helper methods
+    def log_debug(self, component: str, message: str, details: dict = None):
+        """Log debug message."""
+        if self.logger:
+            self.logger.debug(component, message, details)
+    
+    def log_info(self, component: str, message: str, details: dict = None):
+        """Log info message."""
+        if self.logger:
+            self.logger.info(component, message, details)
+    
+    def log_warning(self, component: str, message: str, details: dict = None):
+        """Log warning message."""
+        if self.logger:
+            self.logger.warning(component, message, details)
+    
+    def log_error(self, component: str, message: str, details: dict = None, immediate: bool = True):
+        """Log error message."""
+        if self.logger:
+            self.logger.error(component, message, details, immediate)
+    
+    def log_critical(self, component: str, message: str, details: dict = None, immediate: bool = True):
+        """Log critical message."""
+        if self.logger:
+            self.logger.critical(component, message, details, immediate)
+    
+    def log_exception(self, component: str, exception: Exception, context: str = ""):
+        """Log exception with full context."""
+        if self.logger:
+            self.logger.log_exception(component, exception, context)
 
 _controller = None
 _runtime = None

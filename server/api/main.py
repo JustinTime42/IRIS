@@ -30,6 +30,9 @@ try:
         record_sensor_reading,
         create_sos_incident,
         get_weather_history,
+        create_device_log,
+        get_device_logs,
+        get_device_crash_logs,
     )
 except Exception:
     # Fallback when running from within server/ directory
@@ -44,6 +47,9 @@ except Exception:
         record_sensor_reading,
         create_sos_incident,
         get_weather_history,
+        create_device_log,
+        get_device_logs,
+        get_device_crash_logs,
     )
 
 # Async utilities
@@ -94,6 +100,22 @@ async def process_mqtt_event(topic: str, payload: str) -> None:
                         await log_device_boot(session, device_id=device_id, boot_time=boot_dt)
                     elif msg_type == 'version':
                         await upsert_device(session, device_id=device_id, version=payload)
+                    elif msg_type == 'log':
+                        # Handle device logs: home/system/{device_id}/log
+                        try:
+                            log_data = json.loads(payload) if payload else {}
+                            await create_device_log(
+                                session,
+                                device_id=device_id,
+                                level=log_data.get('level', 'INFO'),
+                                component=log_data.get('component', 'unknown'),
+                                message=log_data.get('message', ''),
+                                details=log_data.get('details'),
+                                device_timestamp=log_data.get('timestamp'),
+                                sequence=log_data.get('sequence'),
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to process device log from {device_id}: {e}")
 
             # Garage and other topics → record as sensor readings
             elif topic == GARAGE_LIGHT_TOPIC:
@@ -863,6 +885,134 @@ async def get_garage_weather_history(
     except Exception as e:
         logger.error(f"weather history failed: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# Device Logging Endpoints
+class DeviceLogResponse(BaseModel):
+    id: int
+    device_id: str
+    level: str
+    component: str
+    message: str
+    details: Optional[dict] = None
+    device_timestamp: Optional[int] = None
+    sequence: Optional[int] = None
+    created_at: datetime
+
+
+@app.get("/api/devices/{device_id}/logs", response_model=List[DeviceLogResponse])
+async def get_device_logs_endpoint(
+    device_id: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    level: Optional[str] = None,
+    component: Optional[str] = None,
+    limit: int = 100,
+    session=Depends(get_session),
+):
+    """Get device logs with optional filtering.
+
+    Args:
+        device_id (str): Device ID to get logs for
+        start (str | None): ISO8601 start time filter
+        end (str | None): ISO8601 end time filter
+        level (str | None): Log level filter (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        component (str | None): Component filter (bootstrap, app, wifi, mqtt, sensors, etc.)
+        limit (int): Maximum number of logs to return (max 500)
+
+    Returns:
+        List[DeviceLogResponse]: List of device logs ordered by creation time desc
+    """
+    # Limit the maximum number of logs to prevent excessive queries
+    limit = min(limit, 500)
+    
+    # Parse datetime strings if provided
+    start_dt = None
+    end_dt = None
+    if start:
+        try:
+            start_dt = dateutil_parser.isoparse(start).replace(tzinfo=None)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid start datetime format")
+    if end:
+        try:
+            end_dt = dateutil_parser.isoparse(end).replace(tzinfo=None)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid end datetime format")
+    
+    try:
+        logs = await get_device_logs(
+            session,
+            device_id=device_id,
+            start=start_dt,
+            end=end_dt,
+            level=level,
+            component=component,
+            limit=limit,
+        )
+        
+        return [
+            DeviceLogResponse(
+                id=log.id,
+                device_id=log.device_id,
+                level=log.level,
+                component=log.component,
+                message=log.message,
+                details=log.details,
+                device_timestamp=log.device_timestamp,
+                sequence=log.sequence,
+                created_at=log.created_at,
+            )
+            for log in logs
+        ]
+    except Exception as e:
+        logger.error(f"Failed to get device logs for {device_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/devices/{device_id}/logs/crash", response_model=List[DeviceLogResponse])
+async def get_device_crash_logs_endpoint(
+    device_id: str,
+    hours_back: int = 24,
+    session=Depends(get_session),
+):
+    """Get logs that might indicate device crashes or issues.
+
+    Args:
+        device_id (str): Device ID
+        hours_back (int): Hours to look back from now (max 168 = 1 week)
+
+    Returns:
+        List[DeviceLogResponse]: Error and critical logs that might indicate crashes
+    """
+    # Limit lookback to 1 week maximum
+    hours_back = min(hours_back, 168)
+    
+    try:
+        logs = await get_device_crash_logs(
+            session,
+            device_id=device_id,
+            hours_back=hours_back,
+        )
+        
+        return [
+            DeviceLogResponse(
+                id=log.id,
+                device_id=log.device_id,
+                level=log.level,
+                component=log.component,
+                message=log.message,
+                details=log.details,
+                device_timestamp=log.device_timestamp,
+                sequence=log.sequence,
+                created_at=log.created_at,
+            )
+            for log in logs
+        ]
+    except Exception as e:
+        logger.error(f"Failed to get crash logs for {device_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     uvicorn.run(
