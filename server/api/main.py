@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Dict, List, Optional
 from pathlib import Path
 import hashlib
+from dateutil import parser as dateutil_parser  # type: ignore
 
 """
 Database imports: handle both package and direct execution contexts.
@@ -28,6 +29,7 @@ try:
         log_device_boot,
         record_sensor_reading,
         create_sos_incident,
+        get_weather_history,
     )
 except Exception:
     # Fallback when running from within server/ directory
@@ -41,6 +43,7 @@ except Exception:
         log_device_boot,
         record_sensor_reading,
         create_sos_incident,
+        get_weather_history,
     )
 
 # Async utilities
@@ -94,22 +97,22 @@ async def process_mqtt_event(topic: str, payload: str) -> None:
 
             # Garage and other topics → record as sensor readings
             elif topic == GARAGE_LIGHT_TOPIC:
-                await record_sensor_reading(session, device_id=None, metric='garage_light', value_text=payload)
+                await record_sensor_reading(session, device_id=GARAGE_DEVICE_ID, metric='garage_light', value_text=payload)
             elif topic == GARAGE_DOOR_STATUS_TOPIC:
-                await record_sensor_reading(session, device_id=None, metric='garage_door', value_text=payload)
+                await record_sensor_reading(session, device_id=GARAGE_DEVICE_ID, metric='garage_door', value_text=payload)
             elif topic == GARAGE_WEATHER_TEMPERATURE_TOPIC:
                 try:
-                    await record_sensor_reading(session, device_id=None, metric='garage_temperature_f', value_float=float(payload))
+                    await record_sensor_reading(session, device_id=GARAGE_DEVICE_ID, metric='garage_temperature_f', value_float=float(payload))
                 except Exception:
                     pass
             elif topic == GARAGE_WEATHER_PRESSURE_TOPIC:
                 try:
-                    await record_sensor_reading(session, device_id=None, metric='garage_pressure_inhg', value_float=float(payload))
+                    await record_sensor_reading(session, device_id=GARAGE_DEVICE_ID, metric='garage_pressure_inhg', value_float=float(payload))
                 except Exception:
                     pass
             elif topic == GARAGE_FREEZER_TEMPERATURE_TOPIC:
                 try:
-                    await record_sensor_reading(session, device_id=None, metric='freezer_temperature_f', value_float=float(payload))
+                    await record_sensor_reading(session, device_id=GARAGE_DEVICE_ID, metric='freezer_temperature_f', value_float=float(payload))
                 except Exception:
                     pass
     except Exception as ex:
@@ -128,6 +131,10 @@ MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "localhost")
 MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", 1883))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
+
+# Associate garage-originated readings with this device_id (must exist in devices table)
+# Override via env GARAGE_DEVICE_ID if your device_id differs (e.g., 'garage-controller')
+GARAGE_DEVICE_ID = os.getenv("GARAGE_DEVICE_ID", "garage-controller")
 
 # OTA Repo Settings
 # If OTA_RAW_BASE is set, it should include the trailing ref or path prefix as needed.
@@ -187,9 +194,27 @@ class DeviceInfo(BaseModel):
     last_boot: Optional[datetime] = None
     ip_address: Optional[str] = None
     rssi: Optional[int] = None  # WiFi signal strength
+    last_error_code: Optional[str] = None
 
 # In-memory device registry
 device_registry: Dict[str, DeviceInfo] = {}
+
+class AlertItem(BaseModel):
+    """Structured current alert for a device.
+
+    Attributes:
+        device_id: Source device identifier
+        code: Machine-friendly code for the error (e.g., "ds18b20_read_error")
+        message: Human-readable message (optional)
+        last_seen: When this alert was last updated
+    """
+    device_id: str
+    code: str
+    message: Optional[str] = None
+    last_seen: datetime
+
+# Map of (device_id, code) -> latest AlertItem
+current_alerts: Dict[tuple[str, str], AlertItem] = {}
 
 def update_device_status(device_id: str, **updates) -> DeviceInfo:
     """Update device status in the registry."""
@@ -207,6 +232,7 @@ def update_device_status(device_id: str, **updates) -> DeviceInfo:
     return device
 
 # MQTT Topics (matching Pico W implementation)
+# GARAGE_DEVICE_ID is configured above; do not override here.
 GARAGE_LIGHT_TOPIC = 'home/garage/light/status'  # From Pico W to server
 GARAGE_LIGHT_COMMAND_TOPIC = 'home/garage/light/command'  # From server to Pico W
 GARAGE_DOOR_STATUS_TOPIC = 'home/garage/door/status'
@@ -243,6 +269,23 @@ class DoorState(BaseModel):
 weather_state = WeatherState()
 freezer_state = FreezerState()
 door_state = DoorState()
+
+def _derive_error_code(details: Dict[str, Any]) -> str:
+    """Derive a machine-friendly error code from SOS details.
+
+    Tries `details['code']`, then `details['error']` or `details['message']`,
+    slugging to snake_case.
+    """
+    raw = details.get('code') or details.get('error') or details.get('message') or 'unknown_error'
+    try:
+        s = str(raw).strip().lower()
+        # Replace non-alphanum with underscores and collapse repeats
+        import re
+        s = re.sub(r"[^a-z0-9]+", "_", s)
+        s = re.sub(r"_+", "_", s).strip('_')
+        return s or 'unknown_error'
+    except Exception:
+        return 'unknown_error'
 
 def update_light_state(new_state: Dict[str, Any]):
     """Update the in-memory light state."""
@@ -291,10 +334,19 @@ def on_message(client, userdata, msg):
                     update_device_status(device_id, status=DeviceStatus(payload))
                 elif msg_type == 'sos':
                     error_info = json.loads(payload) if payload else {}
+                    code = _derive_error_code(error_info)
+                    now = datetime.utcnow()
+                    current_alerts[(device_id, code)] = AlertItem(
+                        device_id=device_id,
+                        code=code,
+                        message=error_info.get('message') or error_info.get('error'),
+                        last_seen=now,
+                    )
                     update_device_status(
                         device_id,
                         status=DeviceStatus.NEEDS_HELP,
-                        last_error=error_info.get('message', 'Unknown error')
+                        last_error=error_info.get('message', 'Unknown error'),
+                        last_error_code=code,
                     )
                 elif msg_type == 'boot':
                     update_device_status(
@@ -388,6 +440,14 @@ async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
     
+    # Ensure the garage device row exists so sensor_readings FK constraints are satisfied
+    try:
+        async with AsyncSessionLocal() as session:  # type: ignore
+            await upsert_device(session, device_id=GARAGE_DEVICE_ID)
+            logger.info("Ensured Device row exists for device_id=%s", GARAGE_DEVICE_ID)
+    except Exception as e:
+        logger.warning("Could not ensure default device exists (%s): %s", GARAGE_DEVICE_ID, e)
+     
     yield  # Application runs here
     
     # Shutdown
@@ -727,6 +787,15 @@ async def reboot_device(device_id: str):
         logger.error(f"Failed to send reboot command: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/alerts/current")
+async def get_current_alerts() -> List[AlertItem]:
+    """Return the most recent instance of each (device_id, code) alert.
+
+    This avoids accumulation; if a given device keeps sending the same code, we only keep the latest.
+    """
+    # Sort by last_seen descending for convenience
+    return sorted((item for item in current_alerts.values()), key=lambda x: x.last_seen, reverse=True)
+
 # WebSocket endpoint for real-time updates
 @app.websocket("/ws/device-status")
 async def websocket_endpoint(websocket: WebSocket):
@@ -743,6 +812,57 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
     finally:
         await websocket.close()
+
+@app.get("/api/garage/weather/history")
+async def get_garage_weather_history(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    range: Optional[str] = None,
+    bucket: str = "hour",
+    session=Depends(get_session),
+):
+    """Return historical weather readings aggregated by time bucket.
+
+    Args:
+        start (str | None): ISO8601 start time (UTC). If omitted, uses now - range (or 24h).
+        end (str | None): ISO8601 end time (UTC). Defaults to now.
+        range (str | None): Convenience like '24h', '7d', '30d'. Ignored when start provided.
+        bucket (str): 'minute' | 'hour' | 'day'. Defaults to 'hour'.
+
+    Returns:
+        list[dict]: [{ ts, temperature_f, pressure_inhg }]
+    """
+    try:
+        now = datetime.utcnow()
+        # Parse end
+        end_dt = dateutil_parser.isoparse(end).replace(tzinfo=None) if end else now
+        # Determine start
+        if start:
+            start_dt = dateutil_parser.isoparse(start).replace(tzinfo=None)
+        else:
+            # Parse range like '24h', '7d', default 24h
+            amount = 24
+            unit = 'h'
+            if range:
+                try:
+                    import re
+                    m = re.fullmatch(r"(\d+)([mhdw])", range.strip().lower())
+                    if m:
+                        amount = int(m.group(1))
+                        unit = m.group(2)
+                except Exception:
+                    pass
+            from datetime import timedelta
+            mult = { 'm': timedelta(minutes=1), 'h': timedelta(hours=1), 'd': timedelta(days=1), 'w': timedelta(weeks=1) }[unit]
+            start_dt = end_dt - amount * mult
+
+        data = await get_weather_history(session, start=start_dt, end=end_dt, bucket=bucket)
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"weather history failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(

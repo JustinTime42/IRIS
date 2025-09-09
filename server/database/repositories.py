@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Device, DeviceBoot, SensorReading, SOSIncident
@@ -105,7 +105,7 @@ async def log_device_boot(
 async def record_sensor_reading(
     session: AsyncSession,
     *,
-    device_id: str,
+    device_id: Optional[str],
     metric: str,
     value_float: Optional[float] = None,
     value_text: Optional[str] = None,
@@ -166,3 +166,57 @@ async def resolve_sos_incident(
     await session.commit()
     await session.refresh(incident)
     return incident
+
+
+async def get_weather_history(
+    session: AsyncSession,
+    *,
+    start: datetime,
+    end: datetime,
+    bucket: str = "hour",
+) -> list[dict]:
+    """
+    Return aggregated weather history between start and end, bucketed by the given granularity.
+
+    Args:
+        session (AsyncSession): DB session.
+        start (datetime): Inclusive start time (UTC).
+        end (datetime): Exclusive end time (UTC).
+        bucket (str): One of 'minute', 'hour', 'day'. Defaults to 'hour'.
+
+    Returns:
+        list[dict]: Rows of { ts: ISO string, temperature_f: float | None, pressure_inhg: float | None } sorted by ts.
+    """
+    # Guard: ensure supported buckets only
+    if bucket not in {"minute", "hour", "day"}:
+        bucket = "hour"
+
+    # Use a single SQL to compute both series aligned by bucket for efficiency
+    sql = text(
+        """
+        SELECT
+            date_trunc(:bucket, recorded_at) AS ts,
+            AVG(value_float) FILTER (WHERE metric = 'garage_temperature_f') AS temperature_f,
+            AVG(value_float) FILTER (WHERE metric = 'garage_pressure_inhg') AS pressure_inhg
+        FROM sensor_readings
+        WHERE metric IN ('garage_temperature_f', 'garage_pressure_inhg')
+          AND recorded_at >= :start
+          AND recorded_at < :end
+        GROUP BY ts
+        ORDER BY ts ASC
+        """
+    )
+    result = await session.execute(sql, {"bucket": bucket, "start": start, "end": end})
+    rows = []
+    for ts, temperature_f, pressure_inhg in result.fetchall():
+        # Normalize to ISO 8601 without timezone info for client-side
+        try:
+            ts_iso = ts.isoformat()
+        except Exception:
+            ts_iso = str(ts)
+        rows.append({
+            "ts": ts_iso,
+            "temperature_f": float(temperature_f) if temperature_f is not None else None,
+            "pressure_inhg": float(pressure_inhg) if pressure_inhg is not None else None,
+        })
+    return rows

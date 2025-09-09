@@ -131,7 +131,18 @@ The LLM can automatically update and create tasks as needed.
   - [ ] Implement recovery workflows
   - [ ] Ensure app exceptions in `tick()`/callbacks do not crash bootstrap; SOS + continue
 
-{{ ... }}
+### Weather Time-Series Feature (2025-09-08)
+- [x] Database: create time-series query to aggregate weather (temperature_f, pressure_inhg) by bucket
+- [x] API: add `GET /api/garage/weather/history` with `start`, `end`, `range`, `bucket` params
+- [x] Server deps: add `python-dateutil` for ISO parsing
+- [x] MQTT ingestion: verify metric names align with DB query (`garage_temperature_f`, `garage_pressure_inhg`)
+- [x] Android API: add `api.getWeatherHistory()` and `useWeatherHistory()` hook
+- [x] Android UI: Weather graphs screen under `History` tab rendering temperature and pressure
+- [x] Android Nav: Weather tile on `HomeScreen` navigates to `History` (Weather graphs)
+- [ ] Future: add range selector (24h, 7d, 30d) and bucket control in UI
+- [ ] Future: smoothing/rolling average and downsampling on server
+- [ ] Future: paginate/stream large ranges via server-side bucketing only
+
 ### Phase 3: Production Deployment
 {{ ... }}
 
@@ -146,3 +157,7 @@ The LLM can automatically update and create tasks as needed.
 ## Discovered During Work
 
 - [x] Add SOS when weather station (BMP388) has no reading, rate-limited to avoid spam (2025-09-08)
+- [x] UI polish: Make garage door tile match flood light tile styling on HomeScreen (2025-09-08)
+- [x] UI: Rearranged freezer monitors side-by-side and removed thresholds buttons on HomeScreen (2025-09-08)
+- [x] Alerts: Expose structured current alerts via /api/alerts/current and consume in app SOS panel (2025-09-08)
+- [x] Weather Time-Series Feature: Implemented database query, API endpoint, and Android UI for weather graphs (2025-09-08)

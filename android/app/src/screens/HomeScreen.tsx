@@ -1,16 +1,17 @@
 import React from 'react';
-import { ScrollView, View, Pressable } from 'react-native';
+import { ScrollView, View } from 'react-native';
 import { useTheme, Card, Text } from 'react-native-paper';
-import { useDoorState, useDoorCommand, useGarageWeather, useGarageFreezer, useLightToggle, useLightState, useDevices } from '../hooks/useGarage';
+import { useDoorState, useDoorCommand, useGarageWeather, useGarageFreezer, useLightToggle, useLightState, useDevices, useAlerts } from '../hooks/useGarage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import GarageDoorGlyph from '../shared/GarageDoorGlyph';
 import AppButton from '../components/AppButton';
 import JarvisActionTile from '../components/JarvisActionTile';
+import { useNavigation } from '@react-navigation/native';
 
-const Tile: React.FC<{ title: string; subtitle?: string; actions?: React.ReactElement[]; status?: React.ReactNode }> = ({ title, subtitle, actions, status }) => {
+const Tile: React.FC<{ title: string; subtitle?: string; actions?: React.ReactElement[]; status?: React.ReactNode; onPress?: () => void }> = ({ title, subtitle, actions, status, onPress }) => {
   const theme = useTheme();
   return (
-    <Card style={{ margin: 8, backgroundColor: theme.colors.surface }}>
+    <Card style={{ margin: 8, backgroundColor: theme.colors.surface }} onPress={onPress}>
       <Card.Title
         title={title}
         subtitle={subtitle}
@@ -27,6 +28,7 @@ const Tile: React.FC<{ title: string; subtitle?: string; actions?: React.ReactEl
 
 export default function HomeScreen() {
   const theme = useTheme();
+  const nav = useNavigation<any>();
   const { data: door, isLoading: doorLoading } = useDoorState();
   const doorCmd = useDoorCommand();
   const { data: weather, isLoading: weatherLoading } = useGarageWeather();
@@ -34,6 +36,7 @@ export default function HomeScreen() {
   const toggleLight = useLightToggle();
   const { data: light, isLoading: lightLoading } = useLightState();
   const { data: devices } = useDevices();
+  const { data: alerts } = useAlerts();
 
   // Helpers
   const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -42,6 +45,9 @@ export default function HomeScreen() {
   const doorPending = doorCmd.isPending || doorLoading || (door?.state === 'opening') || (door?.state === 'closing');
   const lightPending = toggleLight.isPending || lightLoading;
 
+  // Structured SOS items from server (already deduped per device/code)
+  const sosItems = alerts || [];
+
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.background }} contentContainerStyle={{ padding: 8 }}>
       {/* Alert Row placeholder */}
@@ -49,36 +55,19 @@ export default function HomeScreen() {
 
       {/* Compact Controls Row: Garage Door + Flood Light (Jarvis angular tiles) */}
       <View style={{ flexDirection: 'row' }}>
-        {/* Garage Door Card (reverted to previous animated icon + Card) */}
-        <Pressable
-          style={({ pressed }) => ({ flex: 1, margin: 8, transform: [{ scale: pressed ? 0.98 : 1 }] })}
-          onPress={() => { if (!doorCmd.isPending && !doorLoading) doorCmd.mutate('toggle'); }}
-          disabled={doorCmd.isPending || doorLoading}
-        >
-          <Card
-            style={{
-              flex: 1,
-              backgroundColor: theme.colors.surface,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: theme.colors.outlineVariant ?? '#4a4a4a',
-              elevation: 4,
-              shadowColor: '#000',
-              shadowOpacity: 0.25,
-              shadowRadius: 6,
-              shadowOffset: { width: 0, height: 3 },
-              overflow: 'hidden',
-              opacity: (doorCmd.isPending || doorLoading) ? 0.7 : 1,
-            }}
-          >
-            <Card.Content>
-              <View style={{ alignItems: 'center', paddingVertical: 6 }}>
-                <GarageDoorGlyph state={door?.state as any} size={28} />
-                <Text style={{ marginTop: 8, opacity: 0.8 }}>Garage Door</Text>
-              </View>
-            </Card.Content>
-          </Card>
-        </Pressable>
+        {/* Garage Door Tile (use JarvisActionTile to match Flood Light styling) */}
+        <View style={{ flex: 1 }}>
+          <JarvisActionTile
+            title="Garage Door"
+            subtitle={doorLoading ? 'Loading…' : undefined}
+            status={'idle'}
+            onPress={() => { if (!doorCmd.isPending && !doorLoading) doorCmd.mutate('toggle'); }}
+            disabled={doorCmd.isPending || doorLoading}
+            renderIcon={() => (
+              <GarageDoorGlyph state={door?.state as any} size={28} />
+            )}
+          />
+        </View>
 
         {/* Flood Light Tile */}
         <View style={{ flex: 1 }}>
@@ -107,29 +96,47 @@ export default function HomeScreen() {
             ? '—'
             : `${fmt((weather as any).temperature_f, 1)} °F | ${fmt((weather as any).pressure_inhg, 2)} inHg`
         }
+        onPress={() => nav.navigate('History')}
       />
 
-      {/* Freezer (Garage) */}
-      <Tile
-        title="Freezer (Garage)"
-        subtitle={freezerLoading || !freezer ? '—' : `${fmt((freezer as any).temperature_f, 1)} °F`}
-        actions={[<AppButton label="Thresholds" compact />]}
-      />
+      {/* Freezer (Garage) and House Freezer side-by-side */}
+      <View style={{ flexDirection: 'row' }}>
+        <View style={{ flex: 1 }}>
+          <Tile
+            title="Freezer (Garage)"
+            subtitle={freezerLoading || !freezer ? '—' : `${fmt((freezer as any).temperature_f, 1)} °F`}
+          />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Tile
+            title="House Freezer"
+            subtitle="-- °F | Door: closed"
+          />
+        </View>
+      </View>
 
-      {/* House Freezer */}
-      <Tile title="House Freezer" subtitle="-- °F | Door: closed" actions={[<AppButton label="Thresholds" compact />]} />
-
-      {/* SOS */}
-      <Tile title="SOS" subtitle="Active: 0" actions={[<AppButton label="Acknowledge" compact />]} />
+      {/* SOS (only visible when there is a problem) */}
+      {sosItems.length > 0 ? (
+        <Card style={{ margin: 8, backgroundColor: theme.colors.surface }}>
+          <Card.Title title="SOS" subtitle={`Active: ${sosItems.length}`} />
+          <Card.Content>
+            {sosItems.map((it, idx) => (
+              <View key={`${it.device_id}-${it.code}-${idx}`} style={{ paddingVertical: 4 }}>
+                <Text>{`${it.device_id}: ${it.code}`}</Text>
+                {it.message && it.message !== it.code ? (
+                  <Text style={{ opacity: 0.7, fontSize: 12 }}>{it.message}</Text>
+                ) : null}
+              </View>
+            ))}
+          </Card.Content>
+        </Card>
+      ) : null}
 
       {/* Devices */}
       <Tile
         title="Devices"
         subtitle={devices ? `Total: ${Object.keys(devices).length}` : 'Total: —'}
       />
-
-      {/* Updates */}
-      <Tile title="Updates" subtitle="Last: --" actions={[<AppButton label="Trigger OTA" compact />]} />
     </ScrollView>
   );
 }

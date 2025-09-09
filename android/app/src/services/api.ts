@@ -1,5 +1,5 @@
 import { Config } from '../shared/config';
-import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState } from '../types/api';
+import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState, AlertItem, WeatherHistoryPoint } from '../types/api';
 
 /**
  * Simple JSON fetch helper with logging and timeout.
@@ -47,6 +47,15 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   // Garage Weather
   getGarageWeather: () => jsonFetch<WeatherState>('/api/garage/weather'),
+  getWeatherHistory: (opts?: { range?: string; bucket?: 'minute' | 'hour' | 'day'; start?: string; end?: string }) => {
+    const p = new URLSearchParams();
+    if (opts?.start) p.set('start', opts.start);
+    if (opts?.end) p.set('end', opts.end);
+    if (opts?.range) p.set('range', opts.range);
+    if (opts?.bucket) p.set('bucket', opts.bucket);
+    const qs = p.toString();
+    return jsonFetch<WeatherHistoryPoint[]>(`/api/garage/weather/history${qs ? `?${qs}` : ''}`);
+  },
 
   // Garage Freezer
   getGarageFreezer: () => jsonFetch<FreezerState>('/api/garage/freezer'),
@@ -79,4 +88,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ ref }),
     }),
+
+  // Alerts
+  getCurrentAlerts: () => jsonFetch<AlertItem[]>('/api/alerts/current'),
 };

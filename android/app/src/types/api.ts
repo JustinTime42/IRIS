@@ -32,6 +32,23 @@ export interface DeviceInfo {
   last_boot?: string; // ISO datetime
   ip_address?: string;
   rssi?: number;
+  last_error_code?: string;
 }
 
 export type DevicesResponse = Record<string, DeviceInfo>;
+
+export interface AlertItem {
+  device_id: string;
+  code: string;
+  message?: string;
+  last_seen: string; // ISO datetime
+}
+
+export interface WeatherHistoryPoint {
+  /** ISO timestamp for the bucket */
+  ts: string;
+  /** Average temperature in Fahrenheit for the bucket */
+  temperature_f?: number | null;
+  /** Average pressure in inHg for the bucket */
+  pressure_inhg?: number | null;
+}

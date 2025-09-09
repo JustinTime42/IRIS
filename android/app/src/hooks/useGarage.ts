@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
-import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState } from '../types/api';
+import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState, AlertItem, WeatherHistoryPoint } from '../types/api';
 
 /**
  * Weather
@@ -10,6 +10,16 @@ export function useGarageWeather() {
     queryKey: ['garage', 'weather'],
     queryFn: api.getGarageWeather,
     refetchInterval: 10_000,
+  });
+}
+
+export function useWeatherHistory(opts?: { range?: string; bucket?: 'minute' | 'hour' | 'day'; start?: string; end?: string }) {
+  const key = ['garage', 'weather', 'history', opts?.range ?? opts?.start ?? '24h', opts?.bucket ?? 'hour'] as const;
+  return useQuery<WeatherHistoryPoint[]>({
+    queryKey: key,
+    queryFn: () => api.getWeatherHistory(opts),
+    // Hourly history can refresh less frequently
+    refetchInterval: 60_000,
   });
 }
 
@@ -89,5 +99,16 @@ export function useRebootDevice() {
   return useMutation({
     mutationFn: (deviceId: string) => api.rebootDevice(deviceId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['devices'] }),
+  });
+}
+
+/**
+ * Alerts (structured SOS)
+ */
+export function useAlerts() {
+  return useQuery<AlertItem[]>({
+    queryKey: ['alerts', 'current'],
+    queryFn: api.getCurrentAlerts,
+    refetchInterval: 5_000,
   });
 }

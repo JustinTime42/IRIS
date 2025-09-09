@@ -44,6 +44,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_DB=${POSTGRES_DB:-iris}
+      - GARAGE_DEVICE_ID=${GARAGE_DEVICE_ID:-garage-controller}
     depends_on:
       - mqtt
       - db
