@@ -342,10 +342,16 @@ class GarageController:
                 print(f"BMP388 read error: {e}")
             except Exception:
                 pass
-            try:
-                self.sos("bmp388_read_error", f"{e}")
-            except Exception:
-                pass
+            # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
+            current_time = time.ticks_ms()
+            if not hasattr(self, '_bmp388_last_sos_ms'):
+                self._bmp388_last_sos_ms = 0
+            if time.ticks_diff(current_time, self._bmp388_last_sos_ms) > 300000:  # 5 minutes
+                try:
+                    self.sos("bmp388_read_error", f"{e}")
+                    self._bmp388_last_sos_ms = current_time
+                except Exception:
+                    pass
             return None, None
     
     def read_ds18b20(self):
@@ -367,10 +373,16 @@ class GarageController:
                 print(f"DS18B20 read error: {e}")
             except Exception:
                 pass
-            try:
-                self.sos("ds18b20_read_error", f"{e}")
-            except Exception:
-                pass
+            # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
+            current_time = time.ticks_ms()
+            if not hasattr(self, '_ds18b20_last_sos_ms'):
+                self._ds18b20_last_sos_ms = 0
+            if time.ticks_diff(current_time, self._ds18b20_last_sos_ms) > 300000:  # 5 minutes
+                try:
+                    self.sos("ds18b20_read_error", f"{e}")
+                    self._ds18b20_last_sos_ms = current_time
+                except Exception:
+                    pass
         return None
 
     def sos(self, error: str, message: str = "") -> None:
@@ -685,6 +697,27 @@ def tick():
     global _controller
     if _controller:
         _controller.update_sensors()
+        # Periodic garbage collection to prevent memory leaks during long runtime
+        # Only run GC every 10 minutes to avoid performance impact
+        current_time = time.ticks_ms()
+        if not hasattr(_controller, '_last_gc_ms'):
+            _controller._last_gc_ms = current_time
+        if time.ticks_diff(current_time, _controller._last_gc_ms) > 600000:  # 10 minutes
+            try:
+                before_free = gc.mem_free()
+                gc.collect()
+                after_free = gc.mem_free()
+                _controller.log_info("memory", "Garbage collection completed", {
+                    "before_free": before_free,
+                    "after_free": after_free,
+                    "recovered": after_free - before_free
+                })
+                _controller._last_gc_ms = current_time
+            except Exception as e:
+                try:
+                    print(f"GC error: {e}")
+                except Exception:
+                    pass
 
 def shutdown(reason=""):
     """Best-effort quiesce before OTA/reset.
