@@ -3,6 +3,7 @@
 This document provides copy-paste-ready commands for common tasks in this repository.
 
 Notes
+
 - Assumes Windows 11 with PowerShell.
 - Run Docker commands from the `server/` directory unless otherwise noted.
 - MQTT broker runs via Docker Compose as service `mqtt` (container `iris-mqtt`) on `localhost:1883` per `server/docker-compose.yml`.
@@ -11,10 +12,10 @@ Notes
 
 ## Monitor all MQTT channels
 
-
 docker compose exec --% mqtt sh -lc "mosquitto_sub -h localhost -p 1883 -u \"$MQTT_USERNAME\" -P \"$MQTT_PASSWORD\" -v -t \"#\""
 
 # Inside container (uses $MQTT_USERNAME/$MQTT_PASSWORD from .env):
+
 mosquitto_sub -h localhost -p 1883 -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t '#' -v
 
 ## Restart Docker containers / stack
@@ -68,6 +69,7 @@ cd android
 B) Expo EAS Cloud Build (generates a Play Store AAB)
 
 Requirements
+
 - Expo/EAS project configured; sign in with `eas login`.
 - EAS CLI installed: `npm i -g eas-cli` (or use npx: `npx eas-cli@latest --version`).
 
@@ -84,6 +86,7 @@ npx eas build -p android --profile production
 ```
 
 Notes
+
 - Use Path A (Gradle) to sideload and test on device quickly (APK).
 - Use Path B (EAS) for distribution to Play Store (AAB), credentials managed by EAS.
 - If using a managed Expo workflow exclusively, prefer EAS builds.

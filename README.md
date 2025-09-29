@@ -108,6 +108,7 @@ python deployment/scripts/deploy.py
   - `home/system/{device_id}/status` = `updating` while applying files
   - `home/system/{device_id}/status` = `updated` after a successful apply
   - On errors, an SOS is published to `home/system/{device_id}/sos` with details
+- Garage Controller: Flood light relay defaults to ON at boot to ensure light availability immediately after power-up. You can change it via MQTT command/topic `home/garage/light/command` ("on"/"off"/"toggle").
 
 ## Troubleshooting
 

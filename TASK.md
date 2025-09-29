@@ -161,3 +161,4 @@ The LLM can automatically update and create tasks as needed.
 - [x] UI: Rearranged freezer monitors side-by-side and removed thresholds buttons on HomeScreen (2025-09-08)
 - [x] Alerts: Expose structured current alerts via /api/alerts/current and consume in app SOS panel (2025-09-08)
 - [x] Weather Time-Series Feature: Implemented database query, API endpoint, and Android UI for weather graphs (2025-09-08)
+- [x] Garage Controller: Default flood light ON at boot (2025-09-29)

@@ -105,7 +105,7 @@ class GarageController:
             
             # Initialize relays
             self.door_relay = Pin(GARAGE_DOOR_RELAY, Pin.OUT, value=0)  # Active high
-            self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=(1 if LIGHT_RELAY_ACTIVE_LOW else 0))  # Off by default
+            self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=(0 if LIGHT_RELAY_ACTIVE_LOW else 1))  # Default ON at boot
             self.log_info("hardware", "Relays initialized", {
                 "door_relay": GARAGE_DOOR_RELAY, 
                 "light_relay": FLOOD_LIGHT_RELAY,

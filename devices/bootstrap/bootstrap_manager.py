@@ -86,6 +86,16 @@ class BootstrapManager:
         self._quiescing = False
         self._max_deferred_callbacks = 100
         self._deferred_overflow_warned = False
+        
+        # Enhanced reconnection state management
+        self._wifi_retry_count = 0
+        self._wifi_next_retry_ms = 0
+        self._wifi_backoff_ms = 1000  # Start with 1 second backoff
+        self._mqtt_retry_count = 0
+        self._mqtt_next_retry_ms = 0
+        self._mqtt_backoff_ms = 1000  # Start with 1 second backoff
+        self._mqtt_last_ping_ms = 0
+        self._mqtt_connection_healthy = False
 
     def _led_on(self) -> None:
         """Turn the onboard LED on."""
@@ -189,10 +199,17 @@ class BootstrapManager:
     def _ensure_mqtt(self) -> None:
         """
         Ensure MQTT is connected and subscribed to system topics.
+        Handles connection drops, exponential backoff, and health monitoring.
 
         Returns:
             None
         """
+        current_time = time.ticks_ms()
+        
+        # Check if we should wait for next retry
+        if self._mqtt_next_retry_ms > 0 and time.ticks_diff(current_time, self._mqtt_next_retry_ms) < 0:
+            return
+        
         if not self.mqtt:
             if not Mqtt:
                 if not self._logged_mqtt_unavailable:
@@ -210,8 +227,9 @@ class BootstrapManager:
                         pass
                     self._logged_mqtt_unavailable = True
                 return
+
+        # Initialize MQTT client if needed
         if not self.mqtt and Mqtt and self.mqtt_host:
-            # Reason: Pass credentials when broker enforces auth
             try:
                 print("[MQTT] init client:", self.mqtt_host, self.mqtt_port, "user=", bool(self.mqtt_user))
             except Exception:
@@ -227,37 +245,114 @@ class BootstrapManager:
             except Exception:
                 pass
             self._mqtt_ready = False
+            self._mqtt_connection_healthy = False
 
         if not self.mqtt:
             return
 
-        # Only attempt connect when not already connected
-        connected = True
-        just_connected = False
-        try:
-            if not getattr(self.mqtt, "client", None):
+        # Check if current connection is healthy
+        is_connected = self._is_mqtt_connected()
+        
+        # If we think we're connected but haven't had a successful operation in a while, test it
+        if is_connected and self._mqtt_connection_healthy:
+            # Test connection health every 60 seconds with a ping attempt
+            if time.ticks_diff(current_time, self._mqtt_last_ping_ms) > 60000:
+                try:
+                    # Try a simple publish to test connection
+                    test_result = self.mqtt.publish("home/system/{}/ping_test".format(self.device_id), "test", retain=False)
+                    if test_result:
+                        self._mqtt_last_ping_ms = current_time
+                        self._mqtt_connection_healthy = True
+                    else:
+                        try:
+                            print("[MQTT] health check failed - connection appears dead")
+                        except Exception:
+                            pass
+                        self._mqtt_connection_healthy = False
+                        is_connected = False
+                except Exception:
+                    try:
+                        print("[MQTT] health check exception - connection appears dead")
+                    except Exception:
+                        pass
+                    self._mqtt_connection_healthy = False
+                    is_connected = False
+
+        # If connection is dead, clean up and reconnect
+        if not is_connected or not self._mqtt_connection_healthy:
+            try:
+                print("[MQTT] connection lost, attempting reconnect (retry {})".format(self._mqtt_retry_count))
+            except Exception:
+                pass
+            
+            # Clean up existing connection
+            self._cleanup_mqtt_connection()
+            
+            # Attempt to reconnect
+            try:
                 connected = self.mqtt.connect()
-                self._mqtt_ready = False
-                just_connected = connected
-            else:
-                connected = True
+                if connected:
+                    try:
+                        print("[MQTT] reconnected successfully")
+                    except Exception:
+                        pass
+                    self._mqtt_ready = False
+                    self._mqtt_connection_healthy = True
+                    self._mqtt_retry_count = 0
+                    self._mqtt_backoff_ms = 1000  # Reset backoff
+                    self._mqtt_next_retry_ms = 0
+                    self._mqtt_last_ping_ms = current_time
+                    
+                    # Resubscribe and republish after reconnect
+                    self._setup_mqtt_subscriptions()
+                else:
+                    raise Exception("connect() returned False")
+                    
+            except Exception as e:
+                try:
+                    print("[MQTT] reconnect failed:", str(e))
+                except Exception:
+                    pass
+                self._mqtt_connection_healthy = False
+                self._mqtt_retry_count += 1
+                
+                # Exponential backoff with jitter
+                self._mqtt_backoff_ms = min(15000, self._mqtt_backoff_ms * 2)  # Cap at 15 seconds
+                jitter = (current_time % 1000)  # Simple jitter
+                self._mqtt_next_retry_ms = time.ticks_add(current_time, self._mqtt_backoff_ms + jitter)
+                
+                # Publish SOS, but rate limit it
+                if self._mqtt_retry_count % 5 == 1:  # Every 5th failure
+                    self._publish_sos("mqtt_reconnect_failed", "Retry {} failed: {}".format(self._mqtt_retry_count, str(e)))
+
+        # Ensure we're subscribed and published initial state
+        elif self._mqtt_connection_healthy and not self._mqtt_ready:
+            self._setup_mqtt_subscriptions()
+
+    def _is_mqtt_connected(self) -> bool:
+        """Check if MQTT client appears to be connected."""
+        try:
+            return self.mqtt and getattr(self.mqtt, "client", None) is not None
         except Exception:
-            connected = False
-        if not connected:
-            try:
-                print("[MQTT] connect failed:", self.mqtt_host, self.mqtt_port, "user=", bool(self.mqtt_user))
-            except Exception:
-                pass
-            # Emit SOS once per failure loop
-            self._publish_sos("mqtt_connect_failed", "Unable to connect to broker")
-            time.sleep_ms(300)
-            return
-        # Run one-time subscribe/publish after a successful (re)connect
-        if just_connected and not self._mqtt_ready:
-            try:
-                print("[MQTT] connected:", self.mqtt_host, self.mqtt_port)
-            except Exception:
-                pass
+            return False
+
+    def _cleanup_mqtt_connection(self) -> None:
+        """Clean up existing MQTT connection."""
+        try:
+            if self.mqtt and hasattr(self.mqtt, "client") and self.mqtt.client:
+                try:
+                    self.mqtt.client.disconnect()
+                except Exception:
+                    pass
+                self.mqtt.client = None
+        except Exception:
+            pass
+        self._mqtt_ready = False
+        self._mqtt_connection_healthy = False
+
+    def _setup_mqtt_subscriptions(self) -> None:
+        """Set up MQTT subscriptions and publish initial state after connection."""
+        try:
             base = "home/system/{}/".format(self.device_id)
             self.mqtt.subscribe(base + "update")
             self.mqtt.subscribe(base + "ping")
@@ -265,17 +360,30 @@ class BootstrapManager:
                 print("[MQTT] subscribed:", base + "+{update,ping}")
             except Exception:
                 pass
+            
             # Also (re)subscribe any app-registered topics
             try:
                 for t in list(self._app_subscriptions.keys()):
                     self.mqtt.subscribe(t)
+                    try:
+                        print("[MQTT] app resubscribed:", t)
+                    except Exception:
+                        pass
             except Exception:
                 pass
+            
             # On fresh connect, publish boot + health online and version
             self._publish_health("online", retain=True)
             self._publish_boot()
             self._publish_version("unknown")
             self._mqtt_ready = True
+            
+        except Exception as e:
+            try:
+                print("[MQTT] subscription setup failed:", str(e))
+            except Exception:
+                pass
+            self._mqtt_connection_healthy = False
 
     # --- Commands & OTA ---------------------------------------------------
     def _process_commands_nonblocking(self) -> None:

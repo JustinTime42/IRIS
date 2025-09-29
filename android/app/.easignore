@@ -1,0 +1,24 @@
+# Ignore server and device files
+
+../../server/
+../../devices/
+../../shared/
+../../web/
+../../deployment/
+../../memory-bank/
+../../.clinerules/
+
+# Ignore common non-mobile directories
+
+node_modules/
+.git/
+.expo/
+.vscode/
+dist/
+build/
+
+# Ignore system files
+
+.DS_Store
+Thumbs.db
+\*.log
