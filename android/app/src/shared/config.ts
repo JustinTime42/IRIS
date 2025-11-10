@@ -17,7 +17,7 @@ export function getBaseUrl(): string {
   }
 
   // Phone (or non-Android platforms, if applicable) → LAN/VPN host
-  return 'http://192.168.1.116:8000';
+  return 'http://jarvis:8000';
 }
 
 const resolvedBaseUrl = getBaseUrl();
