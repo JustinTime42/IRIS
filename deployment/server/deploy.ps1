@@ -24,16 +24,16 @@
 param(
     [Parameter(Mandatory=$false)]
     [string]$CommitMessage = "Deploy: $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
-    
+
     [Parameter(Mandatory=$false)]
     [switch]$SkipCommit,
-    
+
     [Parameter(Mandatory=$false)]
     [string]$Remote = "production",
-    
+
     [Parameter(Mandatory=$false)]
     [string]$Branch = "main",
-    
+
     [Parameter(Mandatory=$false)]
     [switch]$Force
 )
@@ -98,20 +98,20 @@ if ($status -and -not $SkipCommit) {
     Write-Info "Uncommitted changes detected:"
     git status --short
     Write-Info ""
-    
+
     $response = Read-Host "Commit these changes? (Y/n)"
     if ($response -eq "" -or $response -eq "Y" -or $response -eq "y") {
         Write-Info "Staging all changes..."
         git add .
-        
+
         Write-Info "Committing with message: $CommitMessage"
         git commit -m $CommitMessage
-        
+
         if ($LASTEXITCODE -ne 0) {
             Write-Error "Git commit failed!"
             exit 1
         }
-        Write-Success "✓ Changes committed"
+        Write-Success "Changes committed"
     } else {
         Write-Warning "Deployment cancelled - uncommitted changes remain"
         exit 0
@@ -158,13 +158,13 @@ $pushArgs += @($Remote, "$($currentBranch):$Branch")
 & git @pushArgs
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "✗ Deployment failed!"
+    Write-Error "Deployment failed!"
     exit 1
 }
 
 Write-Info ""
 Write-Success "═══════════════════════════════════════════"
-Write-Success "  ✓ Deployment successful!"
+Write-Success "  Deployment successful!"
 Write-Success "═══════════════════════════════════════════"
 Write-Info ""
 Write-Info "The post-receive hook on the server is now:"
@@ -173,8 +173,8 @@ Write-Info "  2. Rebuilding Docker containers"
 Write-Info "  3. Restarting services"
 Write-Info ""
 Write-Info "Useful commands:"
-Write-Info "  View logs:    ssh justin@<server> 'cd /opt/corvids-nest/server && docker-compose logs -f'"
-Write-Info "  Check status: ssh justin@<server> 'cd /opt/corvids-nest/server && docker-compose ps'"
+Write-Info "  View logs:    ssh justin@<server> 'cd /opt/corvids-nest/server && docker compose logs -f'"
+Write-Info "  Check status: ssh justin@<server> 'cd /opt/corvids-nest/server && docker compose ps'"
 Write-Info "  API health:   curl http://<server>:8000/health"
 Write-Info ""
-Write-Success "Deployment complete! 🚀"
+Write-Success "Deployment complete!"
