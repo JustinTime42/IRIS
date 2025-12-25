@@ -1,3 +1,6 @@
 {
-    "device_id": "house-monitor"
+    "device_id": "house-monitor",
+    "mqtt": {
+        "host": "jarvis"
+    }
 }
