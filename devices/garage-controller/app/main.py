@@ -316,6 +316,87 @@ class GarageController:
         self.last_light_state = state
         self.runtime.publish(TOPIC_LIGHT_STATUS, 'on' if state else 'off')
     
+    def _recover_i2c_bus(self):
+        """Attempt to recover a stuck I2C bus by clocking out any stuck slave.
+
+        If a slave is holding SDA low, toggling SCL 9+ times will clock out
+        any partial transaction. Then we reinitialize the I2C bus.
+
+        Returns:
+            bool: True if recovery was attempted, False if bus looked OK.
+        """
+        try:
+            # Check if SDA is stuck low
+            sda_pin = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP)
+            scl_pin = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP)
+
+            sda_val = sda_pin.value()
+            scl_val = scl_pin.value()
+
+            if sda_val == 1 and scl_val == 1:
+                # Bus looks idle, no recovery needed
+                return False
+
+            print(f"[I2C][RECOVERY] Bus stuck - SDA={sda_val} SCL={scl_val}, attempting recovery...")
+            self.log_warning("i2c", "Bus stuck, attempting recovery", {
+                "sda": sda_val, "scl": scl_val
+            })
+
+            # Take control of SCL as output, leave SDA as input with pull-up
+            scl_out = Pin(I2C_SCL, Pin.OUT, value=1)
+            time.sleep_us(5)
+
+            # Clock SCL 9 times to complete any stuck byte transfer
+            for i in range(9):
+                scl_out.value(0)
+                time.sleep_us(5)
+                scl_out.value(1)
+                time.sleep_us(5)
+
+                # Check if SDA released
+                if Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value() == 1:
+                    print(f"[I2C][RECOVERY] SDA released after {i+1} clocks")
+                    break
+
+            # Generate STOP condition: SDA low->high while SCL high
+            sda_out = Pin(I2C_SDA, Pin.OUT, value=0)
+            time.sleep_us(5)
+            scl_out.value(1)
+            time.sleep_us(5)
+            sda_out.value(1)
+            time.sleep_us(5)
+
+            # Release pins back to input mode
+            Pin(I2C_SDA, Pin.IN, Pin.PULL_UP)
+            Pin(I2C_SCL, Pin.IN, Pin.PULL_UP)
+            time.sleep_ms(10)
+
+            # Verify recovery
+            sda_after = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value()
+            scl_after = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value()
+
+            if sda_after == 1 and scl_after == 1:
+                print("[I2C][RECOVERY] Success - bus recovered")
+                self.log_info("i2c", "Bus recovery successful", {
+                    "sda_after": sda_after, "scl_after": scl_after
+                })
+                # Reinitialize BMP driver after recovery
+                self.bmp = None
+                self._bmp_init_attempted = False
+                self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 1000)
+                return True
+            else:
+                print(f"[I2C][RECOVERY] Failed - SDA={sda_after} SCL={scl_after}")
+                self.log_error("i2c", "Bus recovery failed", {
+                    "sda_after": sda_after, "scl_after": scl_after
+                })
+                return True  # Still attempted
+
+        except Exception as e:
+            print(f"[I2C][RECOVERY] Error: {e}")
+            self.log_error("i2c", "Bus recovery exception", {"error": str(e)})
+            return False
+
     def read_bmp388(self):
         """Read temperature and pressure from BMP388.
 
@@ -331,6 +412,19 @@ class GarageController:
                     pass
             if not self.bmp:
                 return None, None
+
+            # Diagnostic: check I2C line state before read
+            try:
+                sda_val = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value()
+                scl_val = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value()
+                if sda_val == 0 or scl_val == 0:
+                    print(f"[BMP][PRE-READ] WARNING: Bus not idle - SDA={sda_val} SCL={scl_val}")
+                    self._recover_i2c_bus()
+                    if not self.bmp:
+                        return None, None
+            except Exception:
+                pass
+
             # Vendor driver exposes Reading -> (temp_C, pressure_units)
             temp_c, pressure = self.bmp.Reading
             # Convert to Fahrenheit; pressure conversion depends on driver units.
@@ -342,6 +436,14 @@ class GarageController:
                 print(f"BMP388 read error: {e}")
             except Exception:
                 pass
+
+            # Attempt I2C bus recovery on read failure
+            try:
+                if self._recover_i2c_bus():
+                    self.log_info("sensors", "I2C recovery triggered after BMP388 read failure")
+            except Exception:
+                pass
+
             # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
             current_time = time.ticks_ms()
             if not hasattr(self, '_bmp388_last_sos_ms'):
