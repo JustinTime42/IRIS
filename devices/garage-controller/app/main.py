@@ -149,10 +149,6 @@ class GarageController:
                 addrs = _di.scan()
             except Exception:
                 addrs = []
-            try:
-                print("[DIAG][I2C] SDA={} SCL={} scan={}".format(int(sda_ok), int(scl_ok), [hex(a) for a in addrs]))
-            except Exception:
-                pass
             # Schedule a first init attempt shortly after boot to let system settle
             try:
                 self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
@@ -337,7 +333,6 @@ class GarageController:
                 # Bus looks idle, no recovery needed
                 return False
 
-            print(f"[I2C][RECOVERY] Bus stuck - SDA={sda_val} SCL={scl_val}, attempting recovery...")
             self.log_warning("i2c", "Bus stuck, attempting recovery", {
                 "sda": sda_val, "scl": scl_val
             })
@@ -355,7 +350,7 @@ class GarageController:
 
                 # Check if SDA released
                 if Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value() == 1:
-                    print(f"[I2C][RECOVERY] SDA released after {i+1} clocks")
+                    self.log_info("i2c", "SDA released during recovery", {"clocks": i+1})
                     break
 
             # Generate STOP condition: SDA low->high while SCL high
@@ -376,7 +371,6 @@ class GarageController:
             scl_after = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value()
 
             if sda_after == 1 and scl_after == 1:
-                print("[I2C][RECOVERY] Success - bus recovered")
                 self.log_info("i2c", "Bus recovery successful", {
                     "sda_after": sda_after, "scl_after": scl_after
                 })
@@ -386,14 +380,12 @@ class GarageController:
                 self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 1000)
                 return True
             else:
-                print(f"[I2C][RECOVERY] Failed - SDA={sda_after} SCL={scl_after}")
                 self.log_error("i2c", "Bus recovery failed", {
                     "sda_after": sda_after, "scl_after": scl_after
                 })
                 return True  # Still attempted
 
         except Exception as e:
-            print(f"[I2C][RECOVERY] Error: {e}")
             self.log_error("i2c", "Bus recovery exception", {"error": str(e)})
             return False
 
@@ -418,7 +410,9 @@ class GarageController:
                 sda_val = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value()
                 scl_val = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value()
                 if sda_val == 0 or scl_val == 0:
-                    print(f"[BMP][PRE-READ] WARNING: Bus not idle - SDA={sda_val} SCL={scl_val}")
+                    self.log_warning("sensors", "I2C bus not idle before BMP388 read", {
+                        "sda": sda_val, "scl": scl_val
+                    })
                     self._recover_i2c_bus()
                     if not self.bmp:
                         return None, None
@@ -432,10 +426,7 @@ class GarageController:
             pressure_inhg = pressure * 0.02953  # If pressure is in hPa, this yields inHg.
             return temp_c * 1.8 + 32, pressure_inhg
         except Exception as e:
-            try:
-                print(f"BMP388 read error: {e}")
-            except Exception:
-                pass
+            self.log_error("sensors", "BMP388 read failed", {"error": str(e)})
 
             # Attempt I2C bus recovery on read failure
             try:
@@ -471,10 +462,7 @@ class GarageController:
                 temp_c = self.ds_sensor.read_temp(self.ds_roms[0])
                 return temp_c * 1.8 + 32  # Convert to °F
         except Exception as e:
-            try:
-                print(f"DS18B20 read error: {e}")
-            except Exception:
-                pass
+            self.log_error("sensors", "DS18B20 read failed", {"error": str(e)})
             # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
             current_time = time.ticks_ms()
             if not hasattr(self, '_ds18b20_last_sos_ms'):
@@ -528,10 +516,7 @@ class GarageController:
             pass
         
         # Debug: log inbound commands
-        try:
-            print("[APP][MQTT] rx:", topic, msg)
-        except Exception:
-            pass
+        self.log_debug("mqtt", "Received command", {"topic": topic, "message": str(msg)})
 
         if topic == TOPIC_DOOR_COMMAND and msg in ['open', 'close', 'toggle']:
             # Always pulse the relay for open/close/toggle to match wall-button behavior
@@ -645,18 +630,16 @@ class GarageController:
                 addrs = []
 
             if not (sda_ok and scl_ok):
-                try:
-                    print("[BMP][INIT] I2C lines not idle; deferring init. SDA={} SCL={}".format(int(sda_ok), int(scl_ok)))
-                except Exception:
-                    pass
+                self.log_warning("sensors", "I2C lines not idle, deferring BMP388 init", {
+                    "sda": int(sda_ok), "scl": int(scl_ok)
+                })
                 self._schedule_bmp_retry(now, 15000)
                 return
 
             if not (0x76 in addrs or 0x77 in addrs):
-                try:
-                    print("[BMP][INIT] No BMP3xx address on bus; deferring. scan=", [hex(a) for a in addrs])
-                except Exception:
-                    pass
+                self.log_warning("sensors", "BMP388 not detected on I2C bus", {
+                    "scan_results": [hex(a) for a in addrs]
+                })
                 self._schedule_bmp_retry(now, 30000)
                 return
 
@@ -665,25 +648,19 @@ class GarageController:
                 addr = 0x76 if 0x76 in addrs else 0x77
                 _di.writeto(addr, b"\x00")
                 _id = _di.readfrom(addr, 1)[0]
-                try:
-                    print("[BMP][INIT] probe id=", "0x{:02x}".format(_id))
-                except Exception:
-                    pass
+                self.log_debug("sensors", "BMP388 chip ID probe", {"chip_id": "0x{:02x}".format(_id)})
             except Exception:
                 pass
 
             # Try construct driver
             try:
                 self.bmp = bmp3xx.BMP388()
-                try:
-                    print("[BMP][INIT] driver ready")
-                except Exception:
-                    pass
+                self.log_info("sensors", "BMP388 driver initialized successfully")
                 return
             except Exception as e1:
                 try:
                     self.bmp = bmp3xx.BMP3XX()
-                    print("[BMP][INIT] fallback driver ready")
+                    self.log_info("sensors", "BMP388 fallback driver initialized")
                     return
                 except Exception as e2:
                     self.bmp = None
