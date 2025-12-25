@@ -41,8 +41,9 @@ param(
 # Color output functions
 function Write-ColorOutput {
     param(
-        [Parameter(Mandatory=$true)]
-        [string]$Message,
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$Message = "",
         [Parameter(Mandatory=$false)]
         [string]$Color = "White"
     )
