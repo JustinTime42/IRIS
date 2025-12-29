@@ -138,6 +138,56 @@ async def process_mqtt_event(topic: str, payload: str) -> None:
                     await record_sensor_reading(session, device_id=GARAGE_DEVICE_ID, metric='freezer_temperature_f', value_float=float(payload))
                 except Exception:
                     pass
+
+            # House monitor consolidated status - record sensor readings
+            elif topic == HOUSE_MONITOR_STATUS_TOPIC:
+                try:
+                    data = json.loads(payload) if payload else {}
+                    # Ensure device exists
+                    await upsert_device(session, device_id=HOUSE_MONITOR_DEVICE_ID)
+
+                    # Record city power status
+                    city_power = data.get('power', {}).get('city')
+                    if city_power:
+                        await record_sensor_reading(
+                            session,
+                            device_id=HOUSE_MONITOR_DEVICE_ID,
+                            metric='city_power',
+                            value_text=city_power
+                        )
+
+                    # Record freezer temperature
+                    freezer_temp = data.get('freezer', {}).get('temperature_f')
+                    if freezer_temp is not None:
+                        await record_sensor_reading(
+                            session,
+                            device_id=HOUSE_MONITOR_DEVICE_ID,
+                            metric='house_freezer_temperature_f',
+                            value_float=float(freezer_temp)
+                        )
+
+                    # Record freezer door status
+                    freezer_door = data.get('freezer', {}).get('door')
+                    if freezer_door:
+                        await record_sensor_reading(
+                            session,
+                            device_id=HOUSE_MONITOR_DEVICE_ID,
+                            metric='house_freezer_door',
+                            value_text=freezer_door
+                        )
+
+                    # Record door ajar time if door is open
+                    door_ajar_s = data.get('freezer', {}).get('door_ajar_s')
+                    if door_ajar_s is not None and door_ajar_s > 0:
+                        await record_sensor_reading(
+                            session,
+                            device_id=HOUSE_MONITOR_DEVICE_ID,
+                            metric='house_freezer_door_ajar_s',
+                            value_float=float(door_ajar_s)
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Failed to persist house-monitor status: {e}")
     except Exception as ex:
         logger.error(f"process_mqtt_event failed for topic={topic}: {ex}")
 
@@ -264,6 +314,10 @@ GARAGE_WEATHER_TEMPERATURE_TOPIC = 'home/garage/weather/temperature'
 GARAGE_WEATHER_PRESSURE_TOPIC = 'home/garage/weather/pressure'
 GARAGE_FREEZER_TEMPERATURE_TOPIC = 'home/garage/freezer/temperature'
 
+# House Monitor Topics
+HOUSE_MONITOR_DEVICE_ID = os.getenv("HOUSE_MONITOR_DEVICE_ID", "house-monitor")
+HOUSE_MONITOR_STATUS_TOPIC = 'home/house-monitor/status'
+
 # Garage Light State (simplified to match Pico W's string format)
 class LightState(BaseModel):
     state: str  # 'on' or 'off'
@@ -289,9 +343,28 @@ class DoorState(BaseModel):
     last_updated: Optional[datetime] = None
 
 
+class HouseMonitorState(BaseModel):
+    """Consolidated state from house-monitor device.
+
+    Mirrors the status message format published by the device.
+    """
+    timestamp: Optional[int] = None
+    uptime_s: Optional[int] = None
+    health: Optional[str] = None  # 'online' | 'degraded'
+    city_power: Optional[str] = None  # 'online' | 'offline'
+    freezer_temperature_f: Optional[float] = None
+    freezer_door: Optional[str] = None  # 'open' | 'closed'
+    freezer_door_ajar_s: Optional[int] = None
+    errors: List[Dict[str, Any]] = Field(default_factory=list)
+    memory_free: Optional[int] = None
+    memory_allocated: Optional[int] = None
+    last_updated: Optional[datetime] = None
+
+
 weather_state = WeatherState()
 freezer_state = FreezerState()
 door_state = DoorState()
+house_monitor_state = HouseMonitorState()
 
 def _derive_error_code(details: Dict[str, Any]) -> str:
     """Derive a machine-friendly error code from SOS details.
@@ -329,12 +402,15 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         client.subscribe(GARAGE_DOOR_STATUS_TOPIC)
         client.subscribe("home/garage/weather/#")
         client.subscribe("home/garage/freezer/#")
+        # House monitor consolidated status
+        client.subscribe(HOUSE_MONITOR_STATUS_TOPIC)
         logger.info(
-            "Subscribed to MQTT topics: home/system/+/#, %s, %s, %s, %s",
+            "Subscribed to MQTT topics: home/system/+/#, %s, %s, %s, %s, %s",
             GARAGE_LIGHT_TOPIC,
             GARAGE_DOOR_STATUS_TOPIC,
             "home/garage/weather/#",
             "home/garage/freezer/#",
+            HOUSE_MONITOR_STATUS_TOPIC,
         )
     else:
         logger.error(f"Failed to connect to MQTT Broker with code: {reason_code}")
@@ -409,6 +485,45 @@ def on_message(client, userdata, msg):
                 freezer_state.last_updated = datetime.utcnow()
             except Exception:
                 logger.warning(f"Invalid freezer temp payload: {payload}")
+
+        # Handle house-monitor consolidated status
+        elif topic == HOUSE_MONITOR_STATUS_TOPIC:
+            try:
+                data = json.loads(payload)
+                now = datetime.utcnow()
+
+                # Update in-memory state
+                house_monitor_state.timestamp = data.get('timestamp')
+                house_monitor_state.uptime_s = data.get('uptime_s')
+                house_monitor_state.health = data.get('health')
+                house_monitor_state.city_power = data.get('power', {}).get('city')
+                house_monitor_state.freezer_temperature_f = data.get('freezer', {}).get('temperature_f')
+                house_monitor_state.freezer_door = data.get('freezer', {}).get('door')
+                house_monitor_state.freezer_door_ajar_s = data.get('freezer', {}).get('door_ajar_s')
+                house_monitor_state.errors = data.get('errors', [])
+                house_monitor_state.memory_free = data.get('memory', {}).get('free')
+                house_monitor_state.memory_allocated = data.get('memory', {}).get('allocated')
+                house_monitor_state.last_updated = now
+
+                # Update device registry
+                status = DeviceStatus.ONLINE if house_monitor_state.health == 'online' else DeviceStatus.NEEDS_HELP
+                update_device_status(HOUSE_MONITOR_DEVICE_ID, status=status)
+
+                # Track errors as alerts
+                for error in house_monitor_state.errors:
+                    code = error.get('code', 'unknown_error')
+                    current_alerts[(HOUSE_MONITOR_DEVICE_ID, code)] = AlertItem(
+                        device_id=HOUSE_MONITOR_DEVICE_ID,
+                        code=code,
+                        message=error.get('message'),
+                        last_seen=now,
+                    )
+
+                logger.debug(f"House monitor status updated: health={house_monitor_state.health}, city_power={house_monitor_state.city_power}")
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in house-monitor status: {payload}")
+            except Exception as e:
+                logger.error(f"Error processing house-monitor status: {e}")
             
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse MQTT message: {payload}")
@@ -463,13 +578,15 @@ async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_running_loop()
     
-    # Ensure the garage device row exists so sensor_readings FK constraints are satisfied
+    # Ensure device rows exist so sensor_readings FK constraints are satisfied
     try:
         async with AsyncSessionLocal() as session:  # type: ignore
             await upsert_device(session, device_id=GARAGE_DEVICE_ID)
             logger.info("Ensured Device row exists for device_id=%s", GARAGE_DEVICE_ID)
+            await upsert_device(session, device_id=HOUSE_MONITOR_DEVICE_ID)
+            logger.info("Ensured Device row exists for device_id=%s", HOUSE_MONITOR_DEVICE_ID)
     except Exception as e:
-        logger.warning("Could not ensure default device exists (%s): %s", GARAGE_DEVICE_ID, e)
+        logger.warning("Could not ensure default devices exist: %s", e)
      
     yield  # Application runs here
     
@@ -566,6 +683,41 @@ async def get_freezer_temperature():
 async def get_garage_door_state():
     """Get the current garage door state."""
     return door_state
+
+
+# House Monitor Endpoints
+@app.get("/api/house-monitor/status", response_model=HouseMonitorState)
+async def get_house_monitor_status():
+    """Get the latest consolidated status from the house-monitor device.
+
+    Returns the most recent status message including:
+    - City power status (online/offline)
+    - Freezer temperature and door state
+    - Device health and any active errors
+    - Memory statistics
+    """
+    return house_monitor_state
+
+
+@app.get("/api/house-monitor/power")
+async def get_house_monitor_power():
+    """Get city power status from house-monitor."""
+    return {
+        "city_power": house_monitor_state.city_power,
+        "last_updated": house_monitor_state.last_updated
+    }
+
+
+@app.get("/api/house-monitor/freezer")
+async def get_house_monitor_freezer():
+    """Get house freezer status (temperature, door state, ajar time)."""
+    return {
+        "temperature_f": house_monitor_state.freezer_temperature_f,
+        "door": house_monitor_state.freezer_door,
+        "door_ajar_s": house_monitor_state.freezer_door_ajar_s,
+        "last_updated": house_monitor_state.last_updated
+    }
+
 
 @app.post("/api/garage/door/{command}")
 async def send_garage_door_command(command: str):

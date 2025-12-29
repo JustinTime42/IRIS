@@ -1,6 +1,3 @@
 {
-  "device_id": "garage-controller",
-  "mqtt": {
-    "host": "jarvis"
-  }
+  "device_id": "garage-controller"
 }
