@@ -188,6 +188,45 @@ async def process_mqtt_event(topic: str, payload: str) -> None:
 
                 except Exception as e:
                     logger.warning(f"Failed to persist house-monitor status: {e}")
+
+            # Garage controller consolidated status - record sensor readings
+            # Note: Individual topics already record these, but consolidated provides backup
+            elif topic == GARAGE_CONTROLLER_STATUS_TOPIC:
+                try:
+                    data = json.loads(payload) if payload else {}
+
+                    # Record weather temperature from consolidated status
+                    weather_temp = data.get('weather', {}).get('temperature_f')
+                    if weather_temp is not None:
+                        await record_sensor_reading(
+                            session,
+                            device_id=GARAGE_DEVICE_ID,
+                            metric='garage_temperature_f',
+                            value_float=float(weather_temp)
+                        )
+
+                    # Record weather pressure from consolidated status
+                    weather_pressure = data.get('weather', {}).get('pressure_inhg')
+                    if weather_pressure is not None:
+                        await record_sensor_reading(
+                            session,
+                            device_id=GARAGE_DEVICE_ID,
+                            metric='garage_pressure_inhg',
+                            value_float=float(weather_pressure)
+                        )
+
+                    # Record freezer temperature from consolidated status
+                    freezer_temp = data.get('freezer', {}).get('temperature_f')
+                    if freezer_temp is not None:
+                        await record_sensor_reading(
+                            session,
+                            device_id=GARAGE_DEVICE_ID,
+                            metric='freezer_temperature_f',
+                            value_float=float(freezer_temp)
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Failed to persist garage-controller status: {e}")
     except Exception as ex:
         logger.error(f"process_mqtt_event failed for topic={topic}: {ex}")
 
@@ -318,6 +357,9 @@ GARAGE_FREEZER_TEMPERATURE_TOPIC = 'home/garage/freezer/temperature'
 HOUSE_MONITOR_DEVICE_ID = os.getenv("HOUSE_MONITOR_DEVICE_ID", "house-monitor")
 HOUSE_MONITOR_STATUS_TOPIC = 'home/house-monitor/status'
 
+# Garage Controller Consolidated Status Topic
+GARAGE_CONTROLLER_STATUS_TOPIC = 'home/garage-controller/status'
+
 # Garage Light State (simplified to match Pico W's string format)
 class LightState(BaseModel):
     state: str  # 'on' or 'off'
@@ -361,10 +403,31 @@ class HouseMonitorState(BaseModel):
     last_updated: Optional[datetime] = None
 
 
+class GarageControllerState(BaseModel):
+    """Consolidated state from garage-controller device.
+
+    Mirrors the status message format published by the device.
+    This supplements the real-time door/light topics with a periodic snapshot.
+    """
+    timestamp: Optional[int] = None
+    uptime_s: Optional[int] = None
+    health: Optional[str] = None  # 'online' | 'degraded'
+    door_state: Optional[str] = None  # 'open' | 'closed' | 'opening' | 'closing' | 'error'
+    light_state: Optional[str] = None  # 'on' | 'off'
+    weather_temperature_f: Optional[float] = None
+    weather_pressure_inhg: Optional[float] = None
+    freezer_temperature_f: Optional[float] = None
+    errors: List[Dict[str, Any]] = Field(default_factory=list)
+    memory_free: Optional[int] = None
+    memory_allocated: Optional[int] = None
+    last_updated: Optional[datetime] = None
+
+
 weather_state = WeatherState()
 freezer_state = FreezerState()
 door_state = DoorState()
 house_monitor_state = HouseMonitorState()
+garage_controller_state = GarageControllerState()
 
 def _derive_error_code(details: Dict[str, Any]) -> str:
     """Derive a machine-friendly error code from SOS details.
@@ -404,13 +467,16 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
         client.subscribe("home/garage/freezer/#")
         # House monitor consolidated status
         client.subscribe(HOUSE_MONITOR_STATUS_TOPIC)
+        # Garage controller consolidated status
+        client.subscribe(GARAGE_CONTROLLER_STATUS_TOPIC)
         logger.info(
-            "Subscribed to MQTT topics: home/system/+/#, %s, %s, %s, %s, %s",
+            "Subscribed to MQTT topics: home/system/+/#, %s, %s, %s, %s, %s, %s",
             GARAGE_LIGHT_TOPIC,
             GARAGE_DOOR_STATUS_TOPIC,
             "home/garage/weather/#",
             "home/garage/freezer/#",
             HOUSE_MONITOR_STATUS_TOPIC,
+            GARAGE_CONTROLLER_STATUS_TOPIC,
         )
     else:
         logger.error(f"Failed to connect to MQTT Broker with code: {reason_code}")
@@ -524,7 +590,47 @@ def on_message(client, userdata, msg):
                 logger.warning(f"Invalid JSON in house-monitor status: {payload}")
             except Exception as e:
                 logger.error(f"Error processing house-monitor status: {e}")
-            
+
+        # Handle garage-controller consolidated status
+        elif topic == GARAGE_CONTROLLER_STATUS_TOPIC:
+            try:
+                data = json.loads(payload)
+                now = datetime.utcnow()
+
+                # Update in-memory state
+                garage_controller_state.timestamp = data.get('timestamp')
+                garage_controller_state.uptime_s = data.get('uptime_s')
+                garage_controller_state.health = data.get('health')
+                garage_controller_state.door_state = data.get('door', {}).get('state')
+                garage_controller_state.light_state = data.get('light', {}).get('state')
+                garage_controller_state.weather_temperature_f = data.get('weather', {}).get('temperature_f')
+                garage_controller_state.weather_pressure_inhg = data.get('weather', {}).get('pressure_inhg')
+                garage_controller_state.freezer_temperature_f = data.get('freezer', {}).get('temperature_f')
+                garage_controller_state.errors = data.get('errors', [])
+                garage_controller_state.memory_free = data.get('memory', {}).get('free')
+                garage_controller_state.memory_allocated = data.get('memory', {}).get('allocated')
+                garage_controller_state.last_updated = now
+
+                # Update device registry
+                status = DeviceStatus.ONLINE if garage_controller_state.health == 'online' else DeviceStatus.NEEDS_HELP
+                update_device_status(GARAGE_DEVICE_ID, status=status)
+
+                # Track errors as alerts
+                for error in garage_controller_state.errors:
+                    code = error.get('code', 'unknown_error')
+                    current_alerts[(GARAGE_DEVICE_ID, code)] = AlertItem(
+                        device_id=GARAGE_DEVICE_ID,
+                        code=code,
+                        message=error.get('message'),
+                        last_seen=now,
+                    )
+
+                logger.debug(f"Garage controller status updated: health={garage_controller_state.health}, door={garage_controller_state.door_state}")
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in garage-controller status: {payload}")
+            except Exception as e:
+                logger.error(f"Error processing garage-controller status: {e}")
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse MQTT message: {payload}")
     except Exception as e:
@@ -716,6 +822,41 @@ async def get_house_monitor_freezer():
         "door": house_monitor_state.freezer_door,
         "door_ajar_s": house_monitor_state.freezer_door_ajar_s,
         "last_updated": house_monitor_state.last_updated
+    }
+
+
+# Garage Controller Consolidated Status Endpoints
+@app.get("/api/garage-controller/status", response_model=GarageControllerState)
+async def get_garage_controller_status():
+    """Get the latest consolidated status from the garage-controller device.
+
+    Returns the most recent status message including:
+    - Door and light states
+    - Weather temperature and pressure
+    - Freezer temperature
+    - Device health and any active errors
+    - Memory statistics
+
+    Note: This supplements the real-time door/light status topics
+    with a periodic 30-second snapshot for logging and alerting.
+    """
+    return garage_controller_state
+
+
+@app.get("/api/garage-controller/summary")
+async def get_garage_controller_summary():
+    """Get a summary of garage controller state for dashboard display."""
+    return {
+        "door": garage_controller_state.door_state,
+        "light": garage_controller_state.light_state,
+        "weather": {
+            "temperature_f": garage_controller_state.weather_temperature_f,
+            "pressure_inhg": garage_controller_state.weather_pressure_inhg
+        },
+        "freezer_temperature_f": garage_controller_state.freezer_temperature_f,
+        "health": garage_controller_state.health,
+        "errors": garage_controller_state.errors,
+        "last_updated": garage_controller_state.last_updated
     }
 
 

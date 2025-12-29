@@ -50,6 +50,8 @@ TOPIC_LIGHT_COMMAND = 'home/garage/light/command'
 TOPIC_WEATHER_TEMP = 'home/garage/weather/temperature'
 TOPIC_WEATHER_PRESSURE = 'home/garage/weather/pressure'
 TOPIC_FREEZER_TEMP = 'home/garage/freezer/temperature'
+# Consolidated status topic (for logging/alerting alongside real-time topics)
+TOPIC_STATUS = 'home/garage-controller/status'
 
 class GarageController:
     """Main controller for garage door and related components.
@@ -79,6 +81,10 @@ class GarageController:
         self.runtime = runtime
         self.device_id = device_id
         self._sos_topic = "home/system/{}/sos".format(self.device_id)
+        self._boot_time = time.ticks_ms()
+
+        # Active errors list for consolidated status
+        self._errors = []
         
         # Initialize enhanced logging
         try:
@@ -217,10 +223,13 @@ class GarageController:
                 "devices_found": len(self.ds_roms),
                 "roms": [":".join(["{:02x}".format(b) for b in rom]) for rom in self.ds_roms]
             })
+            if not self.ds_roms:
+                self._add_error("ds18b20_not_found", "No DS18B20 sensors found on bus")
         except Exception as e:
             self.ds_sensor = None
             self.ds_roms = []
             self.log_error("sensors", "DS18B20 initialization failed", {"error": str(e)})
+            self._add_error("ds18b20_init_failed", str(e))
             try:
                 self.sos("ds18b20_init_failed", "{}".format(e))
             except Exception:
@@ -563,13 +572,23 @@ class GarageController:
         # Update sensors every 30 seconds
         if time.ticks_diff(current_time, self.last_update) > 30000:
             # Read and publish weather data
-            temp_f, pressure_inhg = self.read_bmp388()
-            if temp_f is not None and pressure_inhg is not None:
-                self.runtime.publish(TOPIC_WEATHER_TEMP, f"{temp_f:.1f}")
+            weather_temp_f, pressure_inhg = self.read_bmp388()
+            if weather_temp_f is not None and pressure_inhg is not None:
+                self.runtime.publish(TOPIC_WEATHER_TEMP, f"{weather_temp_f:.1f}")
                 self.runtime.publish(TOPIC_WEATHER_PRESSURE, f"{pressure_inhg:.2f}")
-                # Reset warning flag on successful read
+                # Cache for consolidated status
+                self._last_weather_temp_f = weather_temp_f
+                self._last_weather_pressure_inhg = pressure_inhg
+                # Reset warning flag and clear error on successful read
                 self._bmp_warned_no_read = False
+                self._clear_error("bmp388_read_error")
+                self._clear_error("bmp388_no_reading")
             else:
+                # Cache null values
+                self._last_weather_temp_f = None
+                self._last_weather_pressure_inhg = None
+                # Track error for consolidated status
+                self._add_error("bmp388_no_reading", "No weather station reading")
                 # If no reading available, emit a rate-limited SOS so we notice sensor outages
                 try:
                     if (not self._bmp_warned_no_read) or (time.ticks_diff(current_time, self._bmp_no_read_last_ms) > 300000):  # 5 minutes
@@ -578,12 +597,21 @@ class GarageController:
                         self._bmp_no_read_last_ms = current_time
                 except Exception:
                     pass
-            
+
             # Read and publish freezer temperature
-            temp_f = self.read_ds18b20()
-            if temp_f is not None:
-                self.runtime.publish(TOPIC_FREEZER_TEMP, f"{temp_f:.1f}")
-            
+            freezer_temp_f = self.read_ds18b20()
+            if freezer_temp_f is not None:
+                self.runtime.publish(TOPIC_FREEZER_TEMP, f"{freezer_temp_f:.1f}")
+                # Cache for consolidated status
+                self._last_freezer_temp_f = freezer_temp_f
+                self._clear_error("ds18b20_read_error")
+            else:
+                self._last_freezer_temp_f = None
+                self._add_error("ds18b20_read_error", "Freezer temperature sensor read failed")
+
+            # Publish consolidated status message
+            self._publish_status()
+
             self.last_update = current_time
             # Blink LED to show activity (portable across ports)
             try:
@@ -640,6 +668,7 @@ class GarageController:
                 self.log_warning("sensors", "BMP388 not detected on I2C bus", {
                     "scan_results": [hex(a) for a in addrs]
                 })
+                self._add_error("bmp388_not_detected", "BMP388 not found on I2C bus")
                 self._schedule_bmp_retry(now, 30000)
                 return
 
@@ -656,14 +685,19 @@ class GarageController:
             try:
                 self.bmp = bmp3xx.BMP388()
                 self.log_info("sensors", "BMP388 driver initialized successfully")
+                self._clear_error("bmp388_init_failed")
+                self._clear_error("bmp388_not_detected")
                 return
             except Exception as e1:
                 try:
                     self.bmp = bmp3xx.BMP3XX()
                     self.log_info("sensors", "BMP388 fallback driver initialized")
+                    self._clear_error("bmp388_init_failed")
+                    self._clear_error("bmp388_not_detected")
                     return
                 except Exception as e2:
                     self.bmp = None
+                    self._add_error("bmp388_init_failed", "{} / {}".format(e1, e2))
                     try:
                         self.sos("bmp388_init_failed", "{} / {}".format(e1, e2))
                     except Exception:
@@ -703,6 +737,102 @@ class GarageController:
             return v == 0
         else:
             return v == 1
+
+    # Error tracking methods for consolidated status
+    def _add_error(self, code: str, message: str):
+        """Add an error to the active errors list.
+
+        Args:
+            code: Error code/type.
+            message: Human-readable details.
+        """
+        for err in self._errors:
+            if err["code"] == code:
+                return  # Already tracked
+        self._errors.append({
+            "code": code,
+            "message": message,
+            "since": time.ticks_ms()
+        })
+
+    def _clear_error(self, code: str):
+        """Remove an error from the active errors list.
+
+        Args:
+            code: Error code to clear.
+        """
+        self._errors = [e for e in self._errors if e["code"] != code]
+
+    def _get_uptime_seconds(self, current_time: int) -> int:
+        """Get device uptime in seconds.
+
+        Args:
+            current_time: Current time in ticks_ms.
+
+        Returns:
+            int: Uptime in seconds.
+        """
+        return time.ticks_diff(current_time, self._boot_time) // 1000
+
+    def _build_status_message(self, current_time: int) -> dict:
+        """Build consolidated status message.
+
+        Args:
+            current_time: Current time in ticks_ms.
+
+        Returns:
+            dict: Status message payload.
+        """
+        # Get memory stats
+        mem_free = None
+        mem_alloc = None
+        try:
+            mem_free = gc.mem_free()
+            mem_alloc = gc.mem_alloc()
+        except Exception:
+            pass
+
+        status = {
+            "timestamp": current_time,
+            "uptime_s": self._get_uptime_seconds(current_time),
+            "health": "online",
+            "door": {
+                "state": self.last_door_state
+            },
+            "light": {
+                "state": "on" if self.last_light_state else "off"
+            },
+            "weather": {
+                "temperature_f": getattr(self, '_last_weather_temp_f', None),
+                "pressure_inhg": getattr(self, '_last_weather_pressure_inhg', None)
+            },
+            "freezer": {
+                "temperature_f": getattr(self, '_last_freezer_temp_f', None)
+            },
+            "errors": self._errors if self._errors else [],
+            "memory": {
+                "free": mem_free,
+                "allocated": mem_alloc
+            }
+        }
+
+        # Set health based on errors
+        if self._errors:
+            status["health"] = "degraded"
+
+        return status
+
+    def _publish_status(self):
+        """Publish consolidated status message."""
+        current_time = time.ticks_ms()
+        status = self._build_status_message(current_time)
+
+        try:
+            payload = json.dumps(status)
+            self.runtime.publish(TOPIC_STATUS, payload)
+            self.log_debug("mqtt", "Published consolidated status", {"size": len(payload)})
+        except Exception as e:
+            self.log_error("mqtt", "Failed to publish status", {"error": str(e)})
 
     # Logging helper methods
     def log_debug(self, component: str, message: str, details: dict = None):
