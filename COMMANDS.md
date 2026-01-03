@@ -14,6 +14,9 @@ Notes
 
 docker compose exec --% mqtt sh -lc "mosquitto_sub -h localhost -p 1883 -u \"$MQTT_USERNAME\" -P \"$MQTT_PASSWORD\" -v -t \"#\""
 
+On linux production server:
+docker compose exec mqtt sh -lc 'mosquitto_sub -h localhost -p 1883 -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -v -t "#"'
+
 # Inside container (uses $MQTT_USERNAME/$MQTT_PASSWORD from .env):
 
 mosquitto_sub -h localhost -p 1883 -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t '#' -v

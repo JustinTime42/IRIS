@@ -31,7 +31,7 @@ _CMD_FIFO_FLUSH  = const(0xB0)
 
 _FIFO_CONFIG        = const(0x08)
 _FIFO_SENSOR_FRAME  = const(0x94)
-_ADCT_FORCED        = const(0x05)
+_ADCT_FORCED        = const(50)  # 50ms - BMP388 needs ~34ms typical for forced measurement
 
 # Over-sampling setting per mode.
 OSR = (0x00, 0x0D)
@@ -53,7 +53,8 @@ class BMP3XX():
         try:
             i2c
         except NameError:
-            i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
+            # Use 100kHz instead of 400kHz for better reliability
+            i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=100000)
         self._Load_Calibration_Data()
         self.SetMode()
 

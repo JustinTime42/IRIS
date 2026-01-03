@@ -88,7 +88,7 @@ class GarageController:
         
         # Initialize enhanced logging
         try:
-            self.logger = DeviceLogger(runtime, device_id, min_level='INFO')
+            self.logger = DeviceLogger(runtime, device_id, min_level='DEBUG')
             set_global_logger(self.logger)
             self.logger.info("app", "Garage controller initializing", {
                 "version": "2.0.0",
@@ -138,31 +138,11 @@ class GarageController:
         # Track weather station (BMP388) read failures to avoid SOS spam
         self._bmp_warned_no_read = False
         self._bmp_no_read_last_ms = 0
+        # Schedule BMP388 init attempt after boot
         try:
-            sda_ok = False
-            scl_ok = False
-            try:
-                sda_ok = bool(Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value())
-                scl_ok = bool(Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value())
-            except Exception:
-                pass
-
-            # Perform a quick scan for diagnostic logging (even if lines look low)
-            addrs = []
-            try:
-                _di = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
-                time.sleep_ms(10)
-                addrs = _di.scan()
-            except Exception:
-                addrs = []
-            # Schedule a first init attempt shortly after boot to let system settle
-            try:
-                self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
-            except Exception:
-                self._bmp_next_retry_ms = 0
+            self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
         except Exception:
-            # Ignore diagnostics errors
-            pass
+            self._bmp_next_retry_ms = 0
         
         # Initialize door sensors
         try:
@@ -176,42 +156,20 @@ class GarageController:
             self.log_error("hardware", "Failed to initialize door sensors", {"error": str(e)})
             raise
 
-        # Initialize BMP388 I2C diagnostics
+        # Initialize BMP388 state (driver will be initialized later via _maybe_init_bmp)
         self.bmp = None
         self._bmp_init_attempted = False
         self._bmp_next_retry_ms = 0
         self._bmp_warned_no_read = False
         self._bmp_no_read_last_ms = 0
-        
+
+        # Schedule BMP388 init attempt
         try:
-            # Check I2C line states
-            sda_ok = bool(Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value())
-            scl_ok = bool(Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value())
+            self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
+        except Exception:
+            self._bmp_next_retry_ms = 0
 
-            # Scan for I2C devices
-            addrs = []
-            try:
-                _di = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
-                time.sleep_ms(10)
-                addrs = _di.scan()
-            except Exception as scan_e:
-                self.log_warning("sensors", "I2C scan failed", {"error": str(scan_e)})
-
-            self.log_info("sensors", "I2C diagnostics completed", {
-                "sda_ok": sda_ok,
-                "scl_ok": scl_ok,
-                "devices_found": [hex(a) for a in addrs],
-                "bmp388_present": (0x76 in addrs or 0x77 in addrs)
-            })
-            
-            # Schedule BMP388 init attempt
-            try:
-                self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
-            except Exception:
-                self._bmp_next_retry_ms = 0
-                
-        except Exception as e:
-            self.log_error("sensors", "I2C diagnostics failed", {"error": str(e)})
+        self.log_info("sensors", "BMP388 init scheduled", {"delay_ms": 3000})
 
         # Initialize DS18B20
         self.ds_pin = Pin(DS18B20_PIN)
@@ -414,20 +372,6 @@ class GarageController:
             if not self.bmp:
                 return None, None
 
-            # Diagnostic: check I2C line state before read
-            try:
-                sda_val = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value()
-                scl_val = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value()
-                if sda_val == 0 or scl_val == 0:
-                    self.log_warning("sensors", "I2C bus not idle before BMP388 read", {
-                        "sda": sda_val, "scl": scl_val
-                    })
-                    self._recover_i2c_bus()
-                    if not self.bmp:
-                        return None, None
-            except Exception:
-                pass
-
             # Vendor driver exposes Reading -> (temp_C, pressure_units)
             temp_c, pressure = self.bmp.Reading
             # Convert to Fahrenheit; pressure conversion depends on driver units.
@@ -437,12 +381,12 @@ class GarageController:
         except Exception as e:
             self.log_error("sensors", "BMP388 read failed", {"error": str(e)})
 
-            # Attempt I2C bus recovery on read failure
-            try:
-                if self._recover_i2c_bus():
-                    self.log_info("sensors", "I2C recovery triggered after BMP388 read failure")
-            except Exception:
-                pass
+            # On read failure, invalidate the driver so it will be reinitialized
+            # Don't attempt I2C pin manipulation as that breaks the I2C peripheral
+            self.bmp = None
+            self._bmp_init_attempted = False
+            self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 5000)
+            self.log_info("sensors", "BMP388 driver invalidated, will reinit in 5s")
 
             # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
             current_time = time.ticks_ms()
@@ -640,58 +584,68 @@ class GarageController:
                 # If ticks functions not available, proceed cautiously once
                 pass
 
-            # Basic line state check
-            try:
-                sda_ok = bool(Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value())
-                scl_ok = bool(Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value())
-            except Exception:
-                sda_ok = True
-                scl_ok = True
-
-            # Scan for device
-            addrs = []
-            try:
-                _di = I2C(1, scl=Pin(I2C_SCL), sda=Pin(I2C_SDA), freq=400000)
-                time.sleep_ms(5)
-                addrs = _di.scan()
-            except Exception:
-                addrs = []
-
-            if not (sda_ok and scl_ok):
-                self.log_warning("sensors", "I2C lines not idle, deferring BMP388 init", {
-                    "sda": int(sda_ok), "scl": int(scl_ok)
-                })
-                self._schedule_bmp_retry(now, 15000)
-                return
-
-            if not (0x76 in addrs or 0x77 in addrs):
-                self.log_warning("sensors", "BMP388 not detected on I2C bus", {
-                    "scan_results": [hex(a) for a in addrs]
-                })
-                self._add_error("bmp388_not_detected", "BMP388 not found on I2C bus")
-                self._schedule_bmp_retry(now, 30000)
-                return
-
-            # Optional: quick probe of chip-id register (0x00)
-            try:
-                addr = 0x76 if 0x76 in addrs else 0x77
-                _di.writeto(addr, b"\x00")
-                _id = _di.readfrom(addr, 1)[0]
-                self.log_debug("sensors", "BMP388 chip ID probe", {"chip_id": "0x{:02x}".format(_id)})
-            except Exception:
-                pass
+            # Skip diagnostic I2C scan - let the driver handle I2C directly
+            # to avoid multiple I2C objects on the same peripheral causing GC issues
 
             # Try construct driver
             try:
                 self.bmp = bmp3xx.BMP388()
-                self.log_info("sensors", "BMP388 driver initialized successfully")
+                # Use Mode 1 (continuous sampling) to avoid forced mode timing issues
+                self.bmp.SetMode(1)
+                self.log_info("sensors", "BMP388 driver initialized successfully (continuous mode)")
+
+                # Immediately test read to verify sensor is responding
+                time.sleep_ms(100)  # Brief delay for continuous mode to settle
+                try:
+                    test_temp, test_pressure = self.bmp.Reading
+                    self.log_info("sensors", "BMP388 test read successful", {
+                        "temp_c": test_temp,
+                        "pressure": test_pressure
+                    })
+                except Exception as test_err:
+                    self.log_error("sensors", "BMP388 test read FAILED immediately after init", {
+                        "error": str(test_err)
+                    })
+                    # Sensor init succeeded but read failed - try a second read after delay
+                    time.sleep_ms(500)
+                    try:
+                        test_temp2, test_pressure2 = self.bmp.Reading
+                        self.log_info("sensors", "BMP388 second test read successful", {
+                            "temp_c": test_temp2,
+                            "pressure": test_pressure2
+                        })
+                    except Exception as test_err2:
+                        self.log_error("sensors", "BMP388 second test read also FAILED", {
+                            "error": str(test_err2)
+                        })
+                        # Driver initialized but reads fail - clear the driver
+                        self.bmp = None
+                        raise test_err2
+
                 self._clear_error("bmp388_init_failed")
                 self._clear_error("bmp388_not_detected")
                 return
             except Exception as e1:
                 try:
                     self.bmp = bmp3xx.BMP3XX()
-                    self.log_info("sensors", "BMP388 fallback driver initialized")
+                    self.bmp.SetMode(1)
+                    self.log_info("sensors", "BMP388 fallback driver initialized (continuous mode)")
+
+                    # Immediately test read to verify sensor is responding
+                    time.sleep_ms(100)
+                    try:
+                        test_temp, test_pressure = self.bmp.Reading
+                        self.log_info("sensors", "BMP3XX test read successful", {
+                            "temp_c": test_temp,
+                            "pressure": test_pressure
+                        })
+                    except Exception as test_err:
+                        self.log_error("sensors", "BMP3XX test read FAILED immediately after init", {
+                            "error": str(test_err)
+                        })
+                        self.bmp = None
+                        raise test_err
+
                     self._clear_error("bmp388_init_failed")
                     self._clear_error("bmp388_not_detected")
                     return
