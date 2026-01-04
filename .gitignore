@@ -3,3 +3,7 @@ network.json
 venv/
 log/
 log
+
+# Mosquitto runtime/sensitive files
+server/mosquitto/data/mosquitto.db
+server/mosquitto/config/passwd

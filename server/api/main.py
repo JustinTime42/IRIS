@@ -151,7 +151,7 @@ async def process_mqtt_event(topic: str, payload: str) -> None:
                                 sequence=log_data.get('sequence'),
                             )
                         except Exception as e:
-                            logger.warning(f"Failed to process device log from {device_id}: {e}")
+                            logger.warning(f"Failed to process device logs from {device_id}: {e}")
 
             # Garage and other topics → record as sensor readings
             elif topic == GARAGE_LIGHT_TOPIC:
