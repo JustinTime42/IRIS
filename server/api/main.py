@@ -60,6 +60,41 @@ import asyncio
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
+# WebSocket connection manager for real-time updates
+class ConnectionManager:
+    """Manages WebSocket connections for broadcasting state updates."""
+
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for conn in self.active_connections[:]:  # Copy list to avoid mutation during iteration
+            try:
+                await conn.send_json(message)
+            except Exception:
+                self.disconnect(conn)
+
+
+ws_manager = ConnectionManager()
+
+
+def broadcast_state_update(update_type: str, data: dict):
+    """Schedule a websocket broadcast from sync MQTT callback context."""
+    if _event_loop is not None:
+        asyncio.run_coroutine_threadsafe(
+            ws_manager.broadcast({"type": update_type, "data": data}),
+            _event_loop
+        )
+
+
 async def process_mqtt_event(topic: str, payload: str) -> None:
     """Persist relevant MQTT events into the database.
 
@@ -524,11 +559,13 @@ def on_message(client, userdata, msg):
         # Handle garage light state
         elif topic == GARAGE_LIGHT_TOPIC:
             update_light_state(payload)
+            broadcast_state_update("light", {"state": payload})
         # Handle door status
         elif topic == GARAGE_DOOR_STATUS_TOPIC:
             try:
                 door_state.state = payload
                 door_state.last_updated = datetime.utcnow()
+                broadcast_state_update("door", {"state": door_state.state})
             except Exception:
                 pass
         # Handle weather topics
@@ -536,12 +573,20 @@ def on_message(client, userdata, msg):
             try:
                 weather_state.temperature_f = float(payload)
                 weather_state.last_updated = datetime.utcnow()
+                broadcast_state_update("weather", {
+                    "temperature_f": weather_state.temperature_f,
+                    "pressure_inhg": weather_state.pressure_inhg
+                })
             except Exception:
                 logger.warning(f"Invalid temperature payload: {payload}")
         elif topic == GARAGE_WEATHER_PRESSURE_TOPIC:
             try:
                 weather_state.pressure_inhg = float(payload)
                 weather_state.last_updated = datetime.utcnow()
+                broadcast_state_update("weather", {
+                    "temperature_f": weather_state.temperature_f,
+                    "pressure_inhg": weather_state.pressure_inhg
+                })
             except Exception:
                 logger.warning(f"Invalid pressure payload: {payload}")
         # Handle freezer topic
@@ -549,6 +594,7 @@ def on_message(client, userdata, msg):
             try:
                 freezer_state.temperature_f = float(payload)
                 freezer_state.last_updated = datetime.utcnow()
+                broadcast_state_update("freezer", {"temperature_f": freezer_state.temperature_f})
             except Exception:
                 logger.warning(f"Invalid freezer temp payload: {payload}")
 
@@ -570,6 +616,15 @@ def on_message(client, userdata, msg):
                 house_monitor_state.memory_free = data.get('memory', {}).get('free')
                 house_monitor_state.memory_allocated = data.get('memory', {}).get('allocated')
                 house_monitor_state.last_updated = now
+
+                # Broadcast to websocket clients
+                broadcast_state_update("house-monitor", {
+                    "city_power": house_monitor_state.city_power,
+                    "freezer_temperature_f": house_monitor_state.freezer_temperature_f,
+                    "freezer_door": house_monitor_state.freezer_door,
+                    "freezer_door_ajar_s": house_monitor_state.freezer_door_ajar_s,
+                    "health": house_monitor_state.health,
+                })
 
                 # Update device registry
                 status = DeviceStatus.ONLINE if house_monitor_state.health == 'online' else DeviceStatus.NEEDS_HELP
@@ -610,6 +665,16 @@ def on_message(client, userdata, msg):
                 garage_controller_state.memory_free = data.get('memory', {}).get('free')
                 garage_controller_state.memory_allocated = data.get('memory', {}).get('allocated')
                 garage_controller_state.last_updated = now
+
+                # Broadcast to websocket clients
+                broadcast_state_update("garage-controller", {
+                    "door_state": garage_controller_state.door_state,
+                    "light_state": garage_controller_state.light_state,
+                    "weather_temperature_f": garage_controller_state.weather_temperature_f,
+                    "weather_pressure_inhg": garage_controller_state.weather_pressure_inhg,
+                    "freezer_temperature_f": garage_controller_state.freezer_temperature_f,
+                    "health": garage_controller_state.health,
+                })
 
                 # Update device registry
                 status = DeviceStatus.ONLINE if garage_controller_state.health == 'online' else DeviceStatus.NEEDS_HELP
@@ -1130,19 +1195,18 @@ async def get_current_alerts() -> List[AlertItem]:
 # WebSocket endpoint for real-time updates
 @app.websocket("/ws/device-status")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
+    await ws_manager.connect(websocket)
     try:
         while True:
-            # Just keep the connection open; we'll push updates as they come
-            # Client can send a ping to check if the connection is still alive
-            await websocket.receive_text()
-            await websocket.send_json({"status": "pong"})
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
+        logger.info("WebSocket client disconnected")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        await websocket.close()
+        ws_manager.disconnect(websocket)
 
 @app.get("/api/garage/weather/history")
 async def get_garage_weather_history(

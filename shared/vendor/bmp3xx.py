@@ -53,9 +53,15 @@ class BMP3XX():
         try:
             i2c
         except NameError:
-            # Use 100kHz instead of 400kHz for better reliability
-            i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=100000)
-        self._Load_Calibration_Data()
+            # Use 50kHz for better reliability over long cables in cold conditions
+            i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=50000)
+        # Try validated calibration loading first (reads 3x and compares)
+        # Fall back to single read if validation fails
+        if not self._Load_Calibration_Data_Validated():
+            self._Load_Calibration_Data()
+            self._calibration_validated = False
+        else:
+            self._calibration_validated = True
         self.SetMode()
 
     # Mode 0 : Forced readings, lower resolution
@@ -336,6 +342,82 @@ class BMP3XX():
         self.P9 = coeff[11]
         self.P10 = coeff[12]
         self.P11 = coeff[13]
+
+    # Load calibration with validation (read 3 times, compare).
+    # Returns True if calibration loaded successfully, False if reads inconsistent.
+    def _Load_Calibration_Data_Validated(self):
+        reads = []
+        for _ in range(3):
+            try:
+                coeff = self._readReg(_REG_COEFF, 21)
+                reads.append(bytes(coeff))
+                time.sleep_ms(10)  # Brief delay between reads
+            except Exception:
+                return False
+        # Compare all reads - they must match
+        if reads[0] != reads[1] or reads[1] != reads[2]:
+            return False
+        # All reads match, unpack and store
+        fmt = '<HHbhhbbHHbbhbb'
+        coeff = unpack(fmt, reads[0])
+        self.T1 = coeff[0]
+        self.T2 = coeff[1]
+        self.T3 = coeff[2]
+        self.P1 = coeff[3]
+        self.P2 = coeff[4]
+        self.P3 = coeff[5]
+        self.P4 = coeff[6]
+        self.P5 = coeff[7]
+        self.P6 = coeff[8]
+        self.P7 = coeff[9]
+        self.P8 = coeff[10]
+        self.P9 = coeff[11]
+        self.P10 = coeff[12]
+        self.P11 = coeff[13]
+        return True
+
+    # Get calibration coefficients as tuple for storage.
+    def get_calibration_tuple(self):
+        return (self.T1, self.T2, self.T3,
+                self.P1, self.P2, self.P3, self.P4, self.P5,
+                self.P6, self.P7, self.P8, self.P9, self.P10, self.P11)
+
+    # Load calibration from stored tuple (bypass I2C read).
+    def load_calibration_from_tuple(self, cal):
+        if len(cal) != 14:
+            return False
+        self.T1 = cal[0]
+        self.T2 = cal[1]
+        self.T3 = cal[2]
+        self.P1 = cal[3]
+        self.P2 = cal[4]
+        self.P3 = cal[5]
+        self.P4 = cal[6]
+        self.P5 = cal[7]
+        self.P6 = cal[8]
+        self.P7 = cal[9]
+        self.P8 = cal[10]
+        self.P9 = cal[11]
+        self.P10 = cal[12]
+        self.P11 = cal[13]
+        return True
+
+    # Check if calibration coefficients are within sane ranges.
+    # Based on typical BMP388 calibration values from datasheet/experience.
+    def calibration_looks_sane(self):
+        # T1 is typically 25000-35000
+        if not (20000 <= self.T1 <= 40000):
+            return False
+        # T2 is typically 15000-25000
+        if not (10000 <= self.T2 <= 30000):
+            return False
+        # T3 is typically -10 to 10
+        if not (-50 <= self.T3 <= 50):
+            return False
+        # P5/P6 are typically large positive values
+        if self.P5 < 10000 or self.P6 < 1000:
+            return False
+        return True
 
     # Writes one or more bytes to register.
     # Bytes is expected to be a list.

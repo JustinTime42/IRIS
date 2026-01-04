@@ -8,7 +8,7 @@
     },
     {
       "device_id": "house-monitor",
-      "config": "devices/house-monitor/device.json",
+      "config": "devices/house-monitor.json",
       "location": "Kitchen Freezer",
       "notes": "DS18B20 + door reed"
     }

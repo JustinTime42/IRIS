@@ -41,6 +41,8 @@ I2C_SCL = 7
 LED_PIN = 'LED'  # Built-in LED
 # Active-low configuration for flood light relay: many modules energize on logic 0
 LIGHT_RELAY_ACTIVE_LOW = True
+# Altitude for MSLP pressure correction (450ft in Fairbanks area)
+ALTITUDE_FT = 450
 
 # MQTT Topics (from design_doc.md)
 TOPIC_DOOR_STATUS = 'home/garage/door/status'
@@ -372,12 +374,17 @@ class GarageController:
             if not self.bmp:
                 return None, None
 
-            # Vendor driver exposes Reading -> (temp_C, pressure_units)
-            temp_c, pressure = self.bmp.Reading
-            # Convert to Fahrenheit; pressure conversion depends on driver units.
-            # Reason: Driver returns scaled value; publish both raw and inHg best-effort.
-            pressure_inhg = pressure * 0.02953  # If pressure is in hPa, this yields inHg.
-            return temp_c * 1.8 + 32, pressure_inhg
+            # Vendor driver exposes Reading -> (temp_C, pressure_hPa)
+            temp_c, pressure_hpa = self.bmp.Reading
+            # Convert to Fahrenheit
+            temp_f = temp_c * 1.8 + 32
+            # Apply MSLP altitude correction: adjust to sea-level equivalent pressure
+            # Formula: MSLP = P / (1 - 2.25577e-5 * altitude_m)^5.25588
+            altitude_m = ALTITUDE_FT * 0.3048
+            pressure_mslp = pressure_hpa / ((1 - 2.25577e-5 * altitude_m) ** 5.25588)
+            # Convert hPa to inHg
+            pressure_inhg = pressure_mslp * 0.02953
+            return temp_f, pressure_inhg
         except Exception as e:
             self.log_error("sensors", "BMP388 read failed", {"error": str(e)})
 
@@ -592,20 +599,63 @@ class GarageController:
                 self.bmp = bmp3xx.BMP388()
                 # Use Mode 1 (continuous sampling) to avoid forced mode timing issues
                 self.bmp.SetMode(1)
-                self.log_info("sensors", "BMP388 driver initialized successfully (continuous mode)")
+                cal_validated = getattr(self.bmp, '_calibration_validated', False)
+                self.log_info("sensors", "BMP388 driver initialized", {
+                    "mode": "continuous",
+                    "calibration_validated": cal_validated
+                })
 
                 # Immediately test read to verify sensor is responding
                 time.sleep_ms(100)  # Brief delay for continuous mode to settle
                 try:
-                    test_temp, test_pressure = self.bmp.Reading
-                    self.log_info("sensors", "BMP388 test read successful", {
-                        "temp_c": test_temp,
-                        "pressure": test_pressure
+                    test_temp_c, test_pressure = self.bmp.Reading
+                    # Convert to F and inHg for sanity check
+                    test_temp_f = test_temp_c * 1.8 + 32
+                    altitude_m = ALTITUDE_FT * 0.3048
+                    test_pressure_mslp = test_pressure / ((1 - 2.25577e-5 * altitude_m) ** 5.25588)
+                    test_pressure_inhg = test_pressure_mslp * 0.02953
+
+                    self.log_info("sensors", "BMP388 test read", {
+                        "temp_f": test_temp_f,
+                        "pressure_inhg": test_pressure_inhg
                     })
+
+                    # Check if reading is sane
+                    if self._reading_is_sane(test_temp_f, test_pressure_inhg):
+                        # Good reading - save calibration for future fallback
+                        cal_tuple = self.bmp.get_calibration_tuple()
+                        self._save_calibration(cal_tuple)
+                        self.log_info("sensors", "BMP388 calibration source: fresh sensor read")
+                    else:
+                        # Reading looks bad - try stored calibration
+                        self.log_warning("sensors", "BMP388 reading out of range, trying stored calibration", {
+                            "temp_f": test_temp_f,
+                            "pressure_inhg": test_pressure_inhg
+                        })
+                        stored_cal = self._load_stored_calibration()
+                        if stored_cal:
+                            self.bmp.load_calibration_from_tuple(stored_cal)
+                            time.sleep_ms(100)
+                            # Re-test with stored calibration
+                            test_temp_c2, test_pressure2 = self.bmp.Reading
+                            test_temp_f2 = test_temp_c2 * 1.8 + 32
+                            test_pressure_mslp2 = test_pressure2 / ((1 - 2.25577e-5 * altitude_m) ** 5.25588)
+                            test_pressure_inhg2 = test_pressure_mslp2 * 0.02953
+                            if self._reading_is_sane(test_temp_f2, test_pressure_inhg2):
+                                self.log_info("sensors", "BMP388 calibration source: stored backup", {
+                                    "temp_f": test_temp_f2,
+                                    "pressure_inhg": test_pressure_inhg2
+                                })
+                            else:
+                                self.log_warning("sensors", "BMP388 reading still out of range with stored cal", {
+                                    "temp_f": test_temp_f2,
+                                    "pressure_inhg": test_pressure_inhg2
+                                })
+                        else:
+                            self.log_warning("sensors", "No stored calibration available, using sensor values")
+
                 except Exception as test_err:
-                    self.log_error("sensors", "BMP388 test read FAILED immediately after init", {
-                        "error": str(test_err)
-                    })
+                    self.log_error("sensors", "BMP388 test read FAILED", {"error": str(test_err)})
                     # Sensor init succeeded but read failed - try a second read after delay
                     time.sleep_ms(500)
                     try:
@@ -629,7 +679,7 @@ class GarageController:
                 try:
                     self.bmp = bmp3xx.BMP3XX()
                     self.bmp.SetMode(1)
-                    self.log_info("sensors", "BMP388 fallback driver initialized (continuous mode)")
+                    self.log_info("sensors", "BMP3XX fallback driver initialized (continuous mode)")
 
                     # Immediately test read to verify sensor is responding
                     time.sleep_ms(100)
@@ -675,6 +725,60 @@ class GarageController:
         except Exception:
             # If ticks_add not available, fall back to immediate retry later
             self._bmp_next_retry_ms = 0
+
+    def _load_stored_calibration(self):
+        """Load stored BMP388 calibration from flash.
+
+        Returns:
+            tuple|None: 14-element calibration tuple, or None if not found/invalid.
+        """
+        try:
+            with open('/lib/bmp_cal.json', 'r') as f:
+                data = json.load(f)
+                cal = data.get('calibration')
+                if cal and len(cal) == 14:
+                    self.log_info("sensors", "Loaded stored BMP388 calibration")
+                    return tuple(cal)
+        except Exception as e:
+            self.log_debug("sensors", "No stored calibration found", {"error": str(e)})
+        return None
+
+    def _save_calibration(self, cal_tuple):
+        """Save BMP388 calibration to flash.
+
+        Args:
+            cal_tuple: 14-element calibration tuple from bmp.get_calibration_tuple()
+
+        Returns:
+            bool: True if saved successfully.
+        """
+        try:
+            data = {'calibration': list(cal_tuple)}
+            with open('/lib/bmp_cal.json', 'w') as f:
+                json.dump(data, f)
+            self.log_info("sensors", "Saved BMP388 calibration to flash")
+            return True
+        except Exception as e:
+            self.log_error("sensors", "Failed to save calibration", {"error": str(e)})
+            return False
+
+    def _reading_is_sane(self, temp_f, pressure_inhg):
+        """Check if a BMP388 reading is within reasonable bounds.
+
+        Args:
+            temp_f: Temperature in Fahrenheit
+            pressure_inhg: Pressure in inches of mercury
+
+        Returns:
+            bool: True if reading looks reasonable.
+        """
+        # Temperature should be between -60F and 120F for this location
+        if temp_f is None or not (-60 <= temp_f <= 120):
+            return False
+        # Pressure should be between 25 and 32 inHg
+        if pressure_inhg is None or not (25 <= pressure_inhg <= 32):
+            return False
+        return True
 
     def _read_light_state(self):
         """Return True if flood light is currently ON based on relay output level.
