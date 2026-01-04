@@ -1,5 +1,5 @@
 import { Config } from '../shared/config';
-import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState, AlertItem, WeatherHistoryPoint } from '../types/api';
+import type { WeatherState, FreezerState, HouseMonitorFreezerState, DoorState, DevicesResponse, LightState, AlertItem, WeatherHistoryPoint } from '../types/api';
 
 /**
  * Simple JSON fetch helper with logging and timeout.
@@ -59,6 +59,9 @@ export const api = {
 
   // Garage Freezer
   getGarageFreezer: () => jsonFetch<FreezerState>('/api/garage/freezer'),
+
+  // House Monitor
+  getHouseMonitorFreezer: () => jsonFetch<HouseMonitorFreezerState>('/api/house-monitor/freezer'),
 
   // Garage Door
   getDoorState: () => jsonFetch<{ state: DoorState }>('/api/garage/door/state'),

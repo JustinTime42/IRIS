@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
-import type { WeatherState, FreezerState, DoorState, DevicesResponse, LightState, AlertItem, WeatherHistoryPoint } from '../types/api';
+import type { WeatherState, FreezerState, HouseMonitorFreezerState, DoorState, DevicesResponse, LightState, AlertItem, WeatherHistoryPoint } from '../types/api';
 
 /**
  * Weather
@@ -31,6 +31,17 @@ export function useGarageFreezer() {
     queryKey: ['garage', 'freezer'],
     queryFn: api.getGarageFreezer,
     refetchInterval: 10_000,
+  });
+}
+
+/**
+ * House Monitor Freezer
+ */
+export function useHouseMonitorFreezer() {
+  return useQuery<HouseMonitorFreezerState>({
+    queryKey: ['house-monitor', 'freezer'],
+    queryFn: api.getHouseMonitorFreezer,
+    refetchInterval: 30_000,
   });
 }
 

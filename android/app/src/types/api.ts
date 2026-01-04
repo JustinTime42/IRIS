@@ -21,6 +21,17 @@ export interface FreezerState {
   temperature_f: number;
 }
 
+export interface HouseMonitorFreezerState {
+  /** Temperature in Fahrenheit */
+  temperature_f: number | null;
+  /** Door status */
+  door: 'open' | 'closed';
+  /** Duration door has been ajar in seconds */
+  door_ajar_s: number;
+  /** ISO datetime string when last updated */
+  last_updated?: string;
+}
+
 export type DeviceStatus = 'online' | 'offline' | 'needs_help' | 'updating' | 'error';
 
 export interface DeviceInfo {

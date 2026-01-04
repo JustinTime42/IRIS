@@ -1,7 +1,7 @@
 import React from 'react';
 import { ScrollView, View } from 'react-native';
 import { useTheme, Card, Text } from 'react-native-paper';
-import { useDoorState, useDoorCommand, useGarageWeather, useGarageFreezer, useLightToggle, useLightState, useDevices, useAlerts } from '../hooks/useGarage';
+import { useDoorState, useDoorCommand, useGarageWeather, useGarageFreezer, useHouseMonitorFreezer, useLightToggle, useLightState, useDevices, useAlerts } from '../hooks/useGarage';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import GarageDoorGlyph from '../shared/GarageDoorGlyph';
 import AppButton from '../components/AppButton';
@@ -33,6 +33,7 @@ export default function HomeScreen() {
   const doorCmd = useDoorCommand();
   const { data: weather, isLoading: weatherLoading } = useGarageWeather();
   const { data: freezer, isLoading: freezerLoading } = useGarageFreezer();
+  const { data: houseFreezer, isLoading: houseFreezerLoading } = useHouseMonitorFreezer();
   const toggleLight = useLightToggle();
   const { data: light, isLoading: lightLoading } = useLightState();
   const { data: devices } = useDevices();
@@ -110,7 +111,11 @@ export default function HomeScreen() {
         <View style={{ flex: 1 }}>
           <Tile
             title="House Freezer"
-            subtitle="-- °F | Door: closed"
+            subtitle={
+              houseFreezerLoading || !houseFreezer
+                ? '—'
+                : `${fmt(houseFreezer.temperature_f, 1)} °F | Door: ${houseFreezer.door}`
+            }
           />
         </View>
       </View>
