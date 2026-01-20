@@ -45,16 +45,17 @@ CtoF = lambda C, d=1: round((C * 9/5) +32, d)
 FtoM = lambda F: int(F / 3.28084)
 
 class BMP3XX():
-    def __init__(self, ADDR=0x76):
+    def __init__(self, ADDR=0x77):
         self.ADDR = ADDR
-        # Initialize I2C for Raspberry Pi Pico W per PINOUT (GP6 SDA, GP7 SCL)
+        # Initialize I2C for Raspberry Pi Pico W per PINOUT (GP4 SDA, GP5 SCL)
         # Reason: micro:bit provides a global i2c; Pico W requires explicit init.
+        # Uses I2C0 on GP4/GP5 to leave GP7 free for DS18B20 1-Wire
         global i2c
         try:
             i2c
         except NameError:
             # Use 50kHz for better reliability over long cables in cold conditions
-            i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=50000)
+            i2c = I2C(0, scl=Pin(5), sda=Pin(4), freq=50000)
         # Try validated calibration loading first (reads 3x and compares)
         # Fall back to single read if validation fails
         if not self._Load_Calibration_Data_Validated():

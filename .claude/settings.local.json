@@ -7,7 +7,10 @@
       "Bash(npm run build:*)",
       "Bash(npx tsc:*)",
       "Bash(git fetch:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(tree:*)",
+      "Bash(cat:*)",
+      "Bash(.gradlew.bat assembleDebug:*)"
     ],
     "deny": [],
     "ask": []

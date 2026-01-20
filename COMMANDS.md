@@ -58,7 +58,7 @@ A) Local Gradle build (generates a release APK)
 
 ```powershell
 # In repo root
-cd android
+cd android/app/android
 # Install dependencies (use the package manager your project uses)
 # npm ci   # or: yarn install
 

@@ -4,7 +4,6 @@ Garage Controller Pico W Application
 Controls and monitors:
 - Garage door (relay + reed switches)
 - Flood light (relay)
-- Environmental sensors (BMP388 for temp/pressure, DS18B20 for freezer temp)
 
 Entry point: init(runtime)
 """
@@ -19,10 +18,7 @@ try:
     import machine
 except Exception:
     import sys as machine  # type: ignore
-import onewire
-import ds18x20
-from machine import Pin, I2C
-import bmp3xx  # Provided in shared/vendor and deployed to /lib
+from machine import Pin
 from shared.config_manager import load_device_config
 from shared.device_logger import DeviceLogger, set_global_logger
 try:
@@ -35,28 +31,21 @@ GARAGE_DOOR_RELAY = 2
 FLOOD_LIGHT_RELAY = 5
 DOOR_OPEN_SW = 3
 DOOR_CLOSED_SW = 4
-DS18B20_PIN = 8
-I2C_SDA = 6
-I2C_SCL = 7
 LED_PIN = 'LED'  # Built-in LED
 # Active-low configuration for flood light relay: many modules energize on logic 0
 LIGHT_RELAY_ACTIVE_LOW = True
-# Altitude for MSLP pressure correction (450ft in Fairbanks area)
-ALTITUDE_FT = 450
 
-# MQTT Topics (from design_doc.md)
+# MQTT Topics
 TOPIC_DOOR_STATUS = 'home/garage/door/status'
 TOPIC_DOOR_COMMAND = 'home/garage/door/command'
 TOPIC_LIGHT_STATUS = 'home/garage/light/status'
 TOPIC_LIGHT_COMMAND = 'home/garage/light/command'
-TOPIC_WEATHER_TEMP = 'home/garage/weather/temperature'
-TOPIC_WEATHER_PRESSURE = 'home/garage/weather/pressure'
-TOPIC_FREEZER_TEMP = 'home/garage/freezer/temperature'
-# Consolidated status topic (for logging/alerting alongside real-time topics)
+# Consolidated status topic
 TOPIC_STATUS = 'home/garage-controller/status'
 
+
 class GarageController:
-    """Main controller for garage door and related components.
+    """Main controller for garage door and flood light.
 
     Attributes:
         runtime: Bootstrap-provided runtime with publish/subscribe/sos APIs.
@@ -66,19 +55,17 @@ class GarageController:
         light_relay (machine.Pin): Output to flood light relay.
         door_open_sw (machine.Pin): Input from "door open" reed switch (active-low).
         door_closed_sw (machine.Pin): Input from "door closed" reed switch (active-low).
-        bmp (bmp3xx.BMP3XX|None): BMP388 sensor instance if available.
-        ds_sensor (ds18x20.DS18X20|None): DS18B20 bus instance if available.
-        ds_roms (list): Discovered DS18B20 ROMs.
         last_door_state (str): Last published door state.
         last_light_state (bool): Last known flood light state.
-        last_update (int): ms timestamp for periodic sensor update.
+        last_update (int): ms timestamp for periodic status update.
     """
-    
+
     def __init__(self, runtime, device_id: str):
         """Initialize hardware and MQTT client.
 
         Args:
             runtime: Bootstrap-provided runtime with publish/subscribe/sos APIs.
+            device_id: Device identifier from config.
         """
         self.runtime = runtime
         self.device_id = device_id
@@ -87,66 +74,41 @@ class GarageController:
 
         # Active errors list for consolidated status
         self._errors = []
-        
+
         # Initialize enhanced logging
         try:
             self.logger = DeviceLogger(runtime, device_id, min_level='DEBUG')
             set_global_logger(self.logger)
             self.logger.info("app", "Garage controller initializing", {
-                "version": "2.0.0",
-                "features": ["door_control", "flood_light", "weather_sensors", "freezer_monitor"],
+                "version": "3.0.0",
+                "features": ["door_control", "flood_light"],
                 "pin_config": {
                     "door_relay": GARAGE_DOOR_RELAY,
                     "light_relay": FLOOD_LIGHT_RELAY,
-                    "door_switches": [DOOR_OPEN_SW, DOOR_CLOSED_SW],
-                    "ds18b20": DS18B20_PIN,
-                    "i2c": [I2C_SDA, I2C_SCL]
+                    "door_switches": [DOOR_OPEN_SW, DOOR_CLOSED_SW]
                 }
             })
         except Exception as e:
-            print(f"[ERROR] Failed to initialize logger: {e}")
+            print("[ERROR] Failed to initialize logger: {}".format(e))
             self.logger = None
-        
+
         try:
             self.led = Pin(LED_PIN, Pin.OUT)
             self.log_info("hardware", "LED initialized", {"pin": LED_PIN})
-            
+
             # Initialize relays
             self.door_relay = Pin(GARAGE_DOOR_RELAY, Pin.OUT, value=0)  # Active high
             self.light_relay = Pin(FLOOD_LIGHT_RELAY, Pin.OUT, value=(0 if LIGHT_RELAY_ACTIVE_LOW else 1))  # Default ON at boot
             self.log_info("hardware", "Relays initialized", {
-                "door_relay": GARAGE_DOOR_RELAY, 
+                "door_relay": GARAGE_DOOR_RELAY,
                 "light_relay": FLOOD_LIGHT_RELAY,
                 "light_active_low": LIGHT_RELAY_ACTIVE_LOW
             })
         except Exception as e:
             self.log_error("hardware", "Failed to initialize relays", {"error": str(e)})
             raise
-        
+
         # Initialize door sensors with pull-ups
-        self.door_open_sw = Pin(DOOR_OPEN_SW, Pin.IN, Pin.PULL_UP)
-        self.door_closed_sw = Pin(DOOR_CLOSED_SW, Pin.IN, Pin.PULL_UP)
-        
-        # Initialize BMP388 driver (uses I2C bus 1 with GP6/GP7 by default per PINOUT)
-        # Reason: Our vendor driver internally initializes I2C for Pico W.
-        # Guards:
-        #  - If SDA/SCL are held low (miswire), I2C ops may hang. Check lines first.
-        #  - Only attempt init if an address 0x76/0x77 is detected on bus scan.
-        # Defer actual BMP driver instantiation to runtime to avoid boot-looping on sensor faults.
-        # We'll perform a quick diagnostic scan here, but not construct the driver yet.
-        self.bmp = None
-        self._bmp_init_attempted = False
-        self._bmp_next_retry_ms = 0  # next allowed attempt time in ticks_ms
-        # Track weather station (BMP388) read failures to avoid SOS spam
-        self._bmp_warned_no_read = False
-        self._bmp_no_read_last_ms = 0
-        # Schedule BMP388 init attempt after boot
-        try:
-            self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
-        except Exception:
-            self._bmp_next_retry_ms = 0
-        
-        # Initialize door sensors
         try:
             self.door_open_sw = Pin(DOOR_OPEN_SW, Pin.IN, Pin.PULL_UP)
             self.door_closed_sw = Pin(DOOR_CLOSED_SW, Pin.IN, Pin.PULL_UP)
@@ -158,60 +120,23 @@ class GarageController:
             self.log_error("hardware", "Failed to initialize door sensors", {"error": str(e)})
             raise
 
-        # Initialize BMP388 state (driver will be initialized later via _maybe_init_bmp)
-        self.bmp = None
-        self._bmp_init_attempted = False
-        self._bmp_next_retry_ms = 0
-        self._bmp_warned_no_read = False
-        self._bmp_no_read_last_ms = 0
-
-        # Schedule BMP388 init attempt
-        try:
-            self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 3000)
-        except Exception:
-            self._bmp_next_retry_ms = 0
-
-        self.log_info("sensors", "BMP388 init scheduled", {"delay_ms": 3000})
-
-        # Initialize DS18B20
-        self.ds_pin = Pin(DS18B20_PIN)
-        try:
-            self.ds_sensor = ds18x20.DS18X20(onewire.OneWire(self.ds_pin))
-            self.ds_roms = self.ds_sensor.scan()
-            self.log_info("sensors", "DS18B20 initialized", {
-                "pin": DS18B20_PIN,
-                "devices_found": len(self.ds_roms),
-                "roms": [":".join(["{:02x}".format(b) for b in rom]) for rom in self.ds_roms]
-            })
-            if not self.ds_roms:
-                self._add_error("ds18b20_not_found", "No DS18B20 sensors found on bus")
-        except Exception as e:
-            self.ds_sensor = None
-            self.ds_roms = []
-            self.log_error("sensors", "DS18B20 initialization failed", {"error": str(e)})
-            self._add_error("ds18b20_init_failed", str(e))
-            try:
-                self.sos("ds18b20_init_failed", "{}".format(e))
-            except Exception:
-                pass
-        
         # State tracking
-        self._expected = None  # type: ignore  # "open"|"closed"|None, to better infer opening/closing
-        # Initialize to a safe placeholder before first read to avoid attribute access during inference
+        self._expected = None  # "open"|"closed"|None, to better infer opening/closing
         self.last_door_state = 'unknown'
         self.last_light_state = False
         self.last_update = 0
-        # Now compute the true initial state
+
+        # Compute initial state
         self.last_door_state = self.get_door_state()
         self.last_light_state = self._read_light_state()
-        
-        # Initial publishes for baseline state (app uses bootstrap-owned MQTT via runtime)
+
+        # Initial publishes for baseline state
         try:
             self.runtime.publish(TOPIC_DOOR_STATUS, self.last_door_state)
             self.runtime.publish(TOPIC_LIGHT_STATUS, 'on' if self.last_light_state else 'off')
         except Exception:
             pass
-    
+
     def get_door_state(self):
         """Determine current garage door state based on reed switches.
 
@@ -232,18 +157,15 @@ class GarageController:
             return 'closed'
 
         # Transition: neither switch active
-        # Infer direction with priority:
-        #  1) Last known terminal state ('open'/'closed')
-        #  2) Expected target (from last command)
-        #  3) Last transitional state
         expected = getattr(self, "_expected", None)
         last = getattr(self, "last_door_state", None)
+
         # Priority 1: last terminal states
         if last == 'open':
             return 'closing'
         if last == 'closed':
             return 'opening'
-        # Priority 2: command hint when terminal state unknown
+        # Priority 2: command hint
         if expected == 'open':
             return 'opening'
         if expected == 'closed':
@@ -253,19 +175,15 @@ class GarageController:
             return 'opening'
         if last in ('closing',):
             return 'closing'
-        # Default bias
+        # Default
         return 'closing'
-    
-    def toggle_garage_door(self):
-        """Momentarily activate the door relay to simulate a wall-button press.
 
-        Returns:
-            None: Relay is pulsed for 500ms.
-        """
+    def toggle_garage_door(self):
+        """Momentarily activate the door relay to simulate a wall-button press."""
         self.door_relay.value(1)
         time.sleep(0.5)  # Pulse relay for 500ms
         self.door_relay.value(0)
-    
+
     def set_light(self, state):
         """Set flood light state and publish status.
 
@@ -273,178 +191,14 @@ class GarageController:
             state (bool): True to turn on, False to turn off.
         """
         if LIGHT_RELAY_ACTIVE_LOW:
-            # Active-low: drive 0 to turn ON, 1 to turn OFF
             self.light_relay.value(0 if state else 1)
         else:
-            # Active-high: drive 1 to turn ON, 0 to turn OFF
             self.light_relay.value(1 if state else 0)
         self.last_light_state = state
         self.runtime.publish(TOPIC_LIGHT_STATUS, 'on' if state else 'off')
-    
-    def _recover_i2c_bus(self):
-        """Attempt to recover a stuck I2C bus by clocking out any stuck slave.
-
-        If a slave is holding SDA low, toggling SCL 9+ times will clock out
-        any partial transaction. Then we reinitialize the I2C bus.
-
-        Returns:
-            bool: True if recovery was attempted, False if bus looked OK.
-        """
-        try:
-            # Check if SDA is stuck low
-            sda_pin = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP)
-            scl_pin = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP)
-
-            sda_val = sda_pin.value()
-            scl_val = scl_pin.value()
-
-            if sda_val == 1 and scl_val == 1:
-                # Bus looks idle, no recovery needed
-                return False
-
-            self.log_warning("i2c", "Bus stuck, attempting recovery", {
-                "sda": sda_val, "scl": scl_val
-            })
-
-            # Take control of SCL as output, leave SDA as input with pull-up
-            scl_out = Pin(I2C_SCL, Pin.OUT, value=1)
-            time.sleep_us(5)
-
-            # Clock SCL 9 times to complete any stuck byte transfer
-            for i in range(9):
-                scl_out.value(0)
-                time.sleep_us(5)
-                scl_out.value(1)
-                time.sleep_us(5)
-
-                # Check if SDA released
-                if Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value() == 1:
-                    self.log_info("i2c", "SDA released during recovery", {"clocks": i+1})
-                    break
-
-            # Generate STOP condition: SDA low->high while SCL high
-            sda_out = Pin(I2C_SDA, Pin.OUT, value=0)
-            time.sleep_us(5)
-            scl_out.value(1)
-            time.sleep_us(5)
-            sda_out.value(1)
-            time.sleep_us(5)
-
-            # Release pins back to input mode
-            Pin(I2C_SDA, Pin.IN, Pin.PULL_UP)
-            Pin(I2C_SCL, Pin.IN, Pin.PULL_UP)
-            time.sleep_ms(10)
-
-            # Verify recovery
-            sda_after = Pin(I2C_SDA, Pin.IN, Pin.PULL_UP).value()
-            scl_after = Pin(I2C_SCL, Pin.IN, Pin.PULL_UP).value()
-
-            if sda_after == 1 and scl_after == 1:
-                self.log_info("i2c", "Bus recovery successful", {
-                    "sda_after": sda_after, "scl_after": scl_after
-                })
-                # Reinitialize BMP driver after recovery
-                self.bmp = None
-                self._bmp_init_attempted = False
-                self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 1000)
-                return True
-            else:
-                self.log_error("i2c", "Bus recovery failed", {
-                    "sda_after": sda_after, "scl_after": scl_after
-                })
-                return True  # Still attempted
-
-        except Exception as e:
-            self.log_error("i2c", "Bus recovery exception", {"error": str(e)})
-            return False
-
-    def read_bmp388(self):
-        """Read temperature and pressure from BMP388.
-
-        Returns:
-            tuple[float|None, float|None]: (temp_f, pressure_inhg) or (None, None) on error.
-        """
-        try:
-            if not self.bmp:
-                # Attempt lazy init if due
-                try:
-                    self._maybe_init_bmp()
-                except Exception:
-                    pass
-            if not self.bmp:
-                return None, None
-
-            # Vendor driver exposes Reading -> (temp_C, pressure_hPa)
-            temp_c, pressure_hpa = self.bmp.Reading
-            # Convert to Fahrenheit
-            temp_f = temp_c * 1.8 + 32
-            # Apply MSLP altitude correction: adjust to sea-level equivalent pressure
-            # Formula: MSLP = P / (1 - 2.25577e-5 * altitude_m)^5.25588
-            altitude_m = ALTITUDE_FT * 0.3048
-            pressure_mslp = pressure_hpa / ((1 - 2.25577e-5 * altitude_m) ** 5.25588)
-            # Convert hPa to inHg
-            pressure_inhg = pressure_mslp * 0.02953
-            return temp_f, pressure_inhg
-        except Exception as e:
-            self.log_error("sensors", "BMP388 read failed", {"error": str(e)})
-
-            # On read failure, invalidate the driver so it will be reinitialized
-            # Don't attempt I2C pin manipulation as that breaks the I2C peripheral
-            self.bmp = None
-            self._bmp_init_attempted = False
-            self._bmp_next_retry_ms = time.ticks_add(time.ticks_ms(), 5000)
-            self.log_info("sensors", "BMP388 driver invalidated, will reinit in 5s")
-
-            # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
-            current_time = time.ticks_ms()
-            if not hasattr(self, '_bmp388_last_sos_ms'):
-                self._bmp388_last_sos_ms = 0
-            if time.ticks_diff(current_time, self._bmp388_last_sos_ms) > 300000:  # 5 minutes
-                try:
-                    self.sos("bmp388_read_error", f"{e}")
-                    self._bmp388_last_sos_ms = current_time
-                except Exception:
-                    pass
-            return None, None
-    
-    def read_ds18b20(self):
-        """Read temperature from DS18B20.
-
-        Returns:
-            float|None: Temperature in Fahrenheit, or None on error.
-        """
-        try:
-            if not self.ds_sensor:
-                return None
-            self.ds_sensor.convert_temp()
-            time.sleep_ms(750)  # Wait for conversion
-            if self.ds_roms:
-                temp_c = self.ds_sensor.read_temp(self.ds_roms[0])
-                return temp_c * 1.8 + 32  # Convert to °F
-        except Exception as e:
-            self.log_error("sensors", "DS18B20 read failed", {"error": str(e)})
-            # Rate-limit SOS messages to prevent spam - only send once every 5 minutes
-            current_time = time.ticks_ms()
-            if not hasattr(self, '_ds18b20_last_sos_ms'):
-                self._ds18b20_last_sos_ms = 0
-            if time.ticks_diff(current_time, self._ds18b20_last_sos_ms) > 300000:  # 5 minutes
-                try:
-                    self.sos("ds18b20_read_error", f"{e}")
-                    self._ds18b20_last_sos_ms = current_time
-                except Exception:
-                    pass
-        return None
 
     def sos(self, error: str, message: str = "") -> None:
-        """Publish an SOS diagnostic event without raising.
-
-        Args:
-            error (str): Error code, e.g., 'bmp388_init_failed'.
-            message (str): Optional human-readable details.
-
-        Returns:
-            None
-        """
+        """Publish an SOS diagnostic event without raising."""
         try:
             payload = {
                 "device_id": self.device_id,
@@ -458,29 +212,24 @@ class GarageController:
                 body = str(payload)
             self.runtime.publish(self._sos_topic, body)
         except Exception:
-            # Never raise from SOS
             pass
-    
+
     def mqtt_callback(self, topic, msg):
         """Handle incoming MQTT messages.
 
         Args:
-            topic (str): Topic string (already decoded by `shared.mqtt_client`).
-            msg (bytes|str): Payload; may be bytes from umqtt.
+            topic (str): Topic string.
+            msg (bytes|str): Payload.
         """
-        # Ensure payload is str for comparisons
         try:
             if isinstance(msg, bytes):
                 msg = msg.decode('utf-8')
         except Exception:
             pass
-        
-        # Debug: log inbound commands
+
         self.log_debug("mqtt", "Received command", {"topic": topic, "message": str(msg)})
 
         if topic == TOPIC_DOOR_COMMAND and msg in ['open', 'close', 'toggle']:
-            # Always pulse the relay for open/close/toggle to match wall-button behavior
-            # while still recording intent to help state inference.
             if msg == 'open':
                 self._expected = 'open'
             elif msg == 'close':
@@ -495,318 +244,46 @@ class GarageController:
                 self.set_light(False)
             elif msg == 'toggle':
                 self.set_light(not self.last_light_state)
-    
-    def update_sensors(self):
-        """Read all sensors and publish updates.
 
-        Publishes:
-            - `home/garage/door/status`: on any door state change.
-            - `home/garage/weather/*`: temperature (F) and pressure (inHg) every 30s.
-            - `home/garage/freezer/temperature`: (F) every 30s.
-        """
+    def update_sensors(self):
+        """Check door state and publish updates."""
         current_time = time.ticks_ms()
-        # Try initializing BMP driver if scheduled
-        try:
-            self._maybe_init_bmp()
-        except Exception:
-            pass
-        
+
         # Update door state if changed
         door_state = self.get_door_state()
         if door_state != self.last_door_state:
             self.runtime.publish(TOPIC_DOOR_STATUS, door_state)
             self.last_door_state = door_state
-            # Clear expected target once we hit terminal state
             if door_state in ('open', 'closed'):
                 self._expected = None
 
-        # Update sensors every 30 seconds
+        # Publish consolidated status every 30 seconds
         if time.ticks_diff(current_time, self.last_update) > 30000:
-            # Read and publish weather data
-            weather_temp_f, pressure_inhg = self.read_bmp388()
-            if weather_temp_f is not None and pressure_inhg is not None:
-                self.runtime.publish(TOPIC_WEATHER_TEMP, f"{weather_temp_f:.1f}")
-                self.runtime.publish(TOPIC_WEATHER_PRESSURE, f"{pressure_inhg:.2f}")
-                # Cache for consolidated status
-                self._last_weather_temp_f = weather_temp_f
-                self._last_weather_pressure_inhg = pressure_inhg
-                # Reset warning flag and clear error on successful read
-                self._bmp_warned_no_read = False
-                self._clear_error("bmp388_read_error")
-                self._clear_error("bmp388_no_reading")
-            else:
-                # Cache null values
-                self._last_weather_temp_f = None
-                self._last_weather_pressure_inhg = None
-                # Track error for consolidated status
-                self._add_error("bmp388_no_reading", "No weather station reading")
-                # If no reading available, emit a rate-limited SOS so we notice sensor outages
-                try:
-                    if (not self._bmp_warned_no_read) or (time.ticks_diff(current_time, self._bmp_no_read_last_ms) > 300000):  # 5 minutes
-                        self.sos("bmp388_no_reading", "No weather station reading (temperature/pressure)")
-                        self._bmp_warned_no_read = True
-                        self._bmp_no_read_last_ms = current_time
-                except Exception:
-                    pass
-
-            # Read and publish freezer temperature
-            freezer_temp_f = self.read_ds18b20()
-            if freezer_temp_f is not None:
-                self.runtime.publish(TOPIC_FREEZER_TEMP, f"{freezer_temp_f:.1f}")
-                # Cache for consolidated status
-                self._last_freezer_temp_f = freezer_temp_f
-                self._clear_error("ds18b20_read_error")
-            else:
-                self._last_freezer_temp_f = None
-                self._add_error("ds18b20_read_error", "Freezer temperature sensor read failed")
-
-            # Publish consolidated status message
             self._publish_status()
-
             self.last_update = current_time
-            # Blink LED to show activity (portable across ports)
+
+            # Blink LED to show activity
             try:
                 self.led.value(0 if self.led.value() else 1)
             except Exception:
                 pass
 
-    def _maybe_init_bmp(self):
-        """Attempt to initialize BMP388 driver with backoff and diagnostics.
-
-        This method is safe to call frequently; it only attempts init when due
-        and when basic I2C line checks and device presence look sane.
-
-        Returns:
-            None
-        """
-        try:
-            if self.bmp is not None:
-                return
-            now = time.ticks_ms()
-            # Respect backoff schedule
-            try:
-                if self._bmp_init_attempted and time.ticks_diff(now, self._bmp_next_retry_ms) < 0:
-                    return
-            except Exception:
-                # If ticks functions not available, proceed cautiously once
-                pass
-
-            # Skip diagnostic I2C scan - let the driver handle I2C directly
-            # to avoid multiple I2C objects on the same peripheral causing GC issues
-
-            # Try construct driver
-            try:
-                self.bmp = bmp3xx.BMP388()
-                # Use Mode 1 (continuous sampling) to avoid forced mode timing issues
-                self.bmp.SetMode(1)
-                cal_validated = getattr(self.bmp, '_calibration_validated', False)
-                self.log_info("sensors", "BMP388 driver initialized", {
-                    "mode": "continuous",
-                    "calibration_validated": cal_validated
-                })
-
-                # Immediately test read to verify sensor is responding
-                time.sleep_ms(100)  # Brief delay for continuous mode to settle
-                try:
-                    test_temp_c, test_pressure = self.bmp.Reading
-                    # Convert to F and inHg for sanity check
-                    test_temp_f = test_temp_c * 1.8 + 32
-                    altitude_m = ALTITUDE_FT * 0.3048
-                    test_pressure_mslp = test_pressure / ((1 - 2.25577e-5 * altitude_m) ** 5.25588)
-                    test_pressure_inhg = test_pressure_mslp * 0.02953
-
-                    self.log_info("sensors", "BMP388 test read", {
-                        "temp_f": test_temp_f,
-                        "pressure_inhg": test_pressure_inhg
-                    })
-
-                    # Check if reading is sane
-                    if self._reading_is_sane(test_temp_f, test_pressure_inhg):
-                        # Good reading - save calibration for future fallback
-                        cal_tuple = self.bmp.get_calibration_tuple()
-                        self._save_calibration(cal_tuple)
-                        self.log_info("sensors", "BMP388 calibration source: fresh sensor read")
-                    else:
-                        # Reading looks bad - try stored calibration
-                        self.log_warning("sensors", "BMP388 reading out of range, trying stored calibration", {
-                            "temp_f": test_temp_f,
-                            "pressure_inhg": test_pressure_inhg
-                        })
-                        stored_cal = self._load_stored_calibration()
-                        if stored_cal:
-                            self.bmp.load_calibration_from_tuple(stored_cal)
-                            time.sleep_ms(100)
-                            # Re-test with stored calibration
-                            test_temp_c2, test_pressure2 = self.bmp.Reading
-                            test_temp_f2 = test_temp_c2 * 1.8 + 32
-                            test_pressure_mslp2 = test_pressure2 / ((1 - 2.25577e-5 * altitude_m) ** 5.25588)
-                            test_pressure_inhg2 = test_pressure_mslp2 * 0.02953
-                            if self._reading_is_sane(test_temp_f2, test_pressure_inhg2):
-                                self.log_info("sensors", "BMP388 calibration source: stored backup", {
-                                    "temp_f": test_temp_f2,
-                                    "pressure_inhg": test_pressure_inhg2
-                                })
-                            else:
-                                self.log_warning("sensors", "BMP388 reading still out of range with stored cal", {
-                                    "temp_f": test_temp_f2,
-                                    "pressure_inhg": test_pressure_inhg2
-                                })
-                        else:
-                            self.log_warning("sensors", "No stored calibration available, using sensor values")
-
-                except Exception as test_err:
-                    self.log_error("sensors", "BMP388 test read FAILED", {"error": str(test_err)})
-                    # Sensor init succeeded but read failed - try a second read after delay
-                    time.sleep_ms(500)
-                    try:
-                        test_temp2, test_pressure2 = self.bmp.Reading
-                        self.log_info("sensors", "BMP388 second test read successful", {
-                            "temp_c": test_temp2,
-                            "pressure": test_pressure2
-                        })
-                    except Exception as test_err2:
-                        self.log_error("sensors", "BMP388 second test read also FAILED", {
-                            "error": str(test_err2)
-                        })
-                        # Driver initialized but reads fail - clear the driver
-                        self.bmp = None
-                        raise test_err2
-
-                self._clear_error("bmp388_init_failed")
-                self._clear_error("bmp388_not_detected")
-                return
-            except Exception as e1:
-                try:
-                    self.bmp = bmp3xx.BMP3XX()
-                    self.bmp.SetMode(1)
-                    self.log_info("sensors", "BMP3XX fallback driver initialized (continuous mode)")
-
-                    # Immediately test read to verify sensor is responding
-                    time.sleep_ms(100)
-                    try:
-                        test_temp, test_pressure = self.bmp.Reading
-                        self.log_info("sensors", "BMP3XX test read successful", {
-                            "temp_c": test_temp,
-                            "pressure": test_pressure
-                        })
-                    except Exception as test_err:
-                        self.log_error("sensors", "BMP3XX test read FAILED immediately after init", {
-                            "error": str(test_err)
-                        })
-                        self.bmp = None
-                        raise test_err
-
-                    self._clear_error("bmp388_init_failed")
-                    self._clear_error("bmp388_not_detected")
-                    return
-                except Exception as e2:
-                    self.bmp = None
-                    self._add_error("bmp388_init_failed", "{} / {}".format(e1, e2))
-                    try:
-                        self.sos("bmp388_init_failed", "{} / {}".format(e1, e2))
-                    except Exception:
-                        pass
-                    self._schedule_bmp_retry(now, 60000)
-        finally:
-            self._bmp_init_attempted = True
-
-    def _schedule_bmp_retry(self, now_ms, delay_ms):
-        """Schedule the next BMP init attempt.
-
-        Args:
-            now_ms (int): Current ticks_ms time.
-            delay_ms (int): Delay before next attempt.
-
-        Returns:
-            None
-        """
-        try:
-            self._bmp_next_retry_ms = time.ticks_add(now_ms, delay_ms)
-        except Exception:
-            # If ticks_add not available, fall back to immediate retry later
-            self._bmp_next_retry_ms = 0
-
-    def _load_stored_calibration(self):
-        """Load stored BMP388 calibration from flash.
-
-        Returns:
-            tuple|None: 14-element calibration tuple, or None if not found/invalid.
-        """
-        try:
-            with open('/lib/bmp_cal.json', 'r') as f:
-                data = json.load(f)
-                cal = data.get('calibration')
-                if cal and len(cal) == 14:
-                    self.log_info("sensors", "Loaded stored BMP388 calibration")
-                    return tuple(cal)
-        except Exception as e:
-            self.log_debug("sensors", "No stored calibration found", {"error": str(e)})
-        return None
-
-    def _save_calibration(self, cal_tuple):
-        """Save BMP388 calibration to flash.
-
-        Args:
-            cal_tuple: 14-element calibration tuple from bmp.get_calibration_tuple()
-
-        Returns:
-            bool: True if saved successfully.
-        """
-        try:
-            data = {'calibration': list(cal_tuple)}
-            with open('/lib/bmp_cal.json', 'w') as f:
-                json.dump(data, f)
-            self.log_info("sensors", "Saved BMP388 calibration to flash")
-            return True
-        except Exception as e:
-            self.log_error("sensors", "Failed to save calibration", {"error": str(e)})
-            return False
-
-    def _reading_is_sane(self, temp_f, pressure_inhg):
-        """Check if a BMP388 reading is within reasonable bounds.
-
-        Args:
-            temp_f: Temperature in Fahrenheit
-            pressure_inhg: Pressure in inches of mercury
-
-        Returns:
-            bool: True if reading looks reasonable.
-        """
-        # Temperature should be between -60F and 120F for this location
-        if temp_f is None or not (-60 <= temp_f <= 120):
-            return False
-        # Pressure should be between 25 and 32 inHg
-        if pressure_inhg is None or not (25 <= pressure_inhg <= 32):
-            return False
-        return True
-
     def _read_light_state(self):
-        """Return True if flood light is currently ON based on relay output level.
-
-        Returns:
-            bool: True if light is ON, False otherwise.
-        """
+        """Return True if flood light is currently ON."""
         try:
             v = self.light_relay.value()
         except Exception:
-            # If pin read fails, assume OFF for safety
             v = (1 if LIGHT_RELAY_ACTIVE_LOW else 0)
         if LIGHT_RELAY_ACTIVE_LOW:
             return v == 0
         else:
             return v == 1
 
-    # Error tracking methods for consolidated status
     def _add_error(self, code: str, message: str):
-        """Add an error to the active errors list.
-
-        Args:
-            code: Error code/type.
-            message: Human-readable details.
-        """
+        """Add an error to the active errors list."""
         for err in self._errors:
             if err["code"] == code:
-                return  # Already tracked
+                return
         self._errors.append({
             "code": code,
             "message": message,
@@ -814,34 +291,15 @@ class GarageController:
         })
 
     def _clear_error(self, code: str):
-        """Remove an error from the active errors list.
-
-        Args:
-            code: Error code to clear.
-        """
+        """Remove an error from the active errors list."""
         self._errors = [e for e in self._errors if e["code"] != code]
 
     def _get_uptime_seconds(self, current_time: int) -> int:
-        """Get device uptime in seconds.
-
-        Args:
-            current_time: Current time in ticks_ms.
-
-        Returns:
-            int: Uptime in seconds.
-        """
+        """Get device uptime in seconds."""
         return time.ticks_diff(current_time, self._boot_time) // 1000
 
     def _build_status_message(self, current_time: int) -> dict:
-        """Build consolidated status message.
-
-        Args:
-            current_time: Current time in ticks_ms.
-
-        Returns:
-            dict: Status message payload.
-        """
-        # Get memory stats
+        """Build consolidated status message."""
         mem_free = None
         mem_alloc = None
         try:
@@ -860,13 +318,6 @@ class GarageController:
             "light": {
                 "state": "on" if self.last_light_state else "off"
             },
-            "weather": {
-                "temperature_f": getattr(self, '_last_weather_temp_f', None),
-                "pressure_inhg": getattr(self, '_last_weather_pressure_inhg', None)
-            },
-            "freezer": {
-                "temperature_f": getattr(self, '_last_freezer_temp_f', None)
-            },
             "errors": self._errors if self._errors else [],
             "memory": {
                 "free": mem_free,
@@ -874,7 +325,6 @@ class GarageController:
             }
         }
 
-        # Set health based on errors
         if self._errors:
             status["health"] = "degraded"
 
@@ -894,51 +344,32 @@ class GarageController:
 
     # Logging helper methods
     def log_debug(self, component: str, message: str, details: dict = None):
-        """Log debug message."""
         if self.logger:
             self.logger.debug(component, message, details)
-    
+
     def log_info(self, component: str, message: str, details: dict = None):
-        """Log info message."""
         if self.logger:
             self.logger.info(component, message, details)
-    
+
     def log_warning(self, component: str, message: str, details: dict = None):
-        """Log warning message."""
         if self.logger:
             self.logger.warning(component, message, details)
-    
+
     def log_error(self, component: str, message: str, details: dict = None, immediate: bool = True):
-        """Log error message."""
         if self.logger:
             self.logger.error(component, message, details, immediate)
-    
-    def log_critical(self, component: str, message: str, details: dict = None, immediate: bool = True):
-        """Log critical message."""
-        if self.logger:
-            self.logger.critical(component, message, details, immediate)
-    
-    def log_exception(self, component: str, exception: Exception, context: str = ""):
-        """Log exception with full context."""
-        if self.logger:
-            self.logger.log_exception(component, exception, context)
+
 
 _controller = None
 _runtime = None
 
+
 def init(runtime):
-    """Initialize the app with the bootstrap-provided runtime.
-
-    Args:
-        runtime: Runtime API from bootstrap (publish/subscribe/sos/etc.).
-
-    Returns:
-        None
-    """
+    """Initialize the app with the bootstrap-provided runtime."""
     global _controller, _runtime
     _runtime = runtime
     cfg = load_device_config()
-    device_id = cfg.get("device_id") or "device-unknown"
+    device_id = cfg.get("device_id") or "garage-controller"
     try:
         print("[APP] init controller...")
     except Exception:
@@ -948,53 +379,33 @@ def init(runtime):
         print("[APP] controller ready")
     except Exception:
         pass
-    # Subscribe to command topics via runtime (fast path for low latency)
+    # Subscribe to command topics
     try:
         runtime.subscribe(TOPIC_DOOR_COMMAND, lambda t, m: _controller.mqtt_callback(t, m), fast=True)
         runtime.subscribe(TOPIC_LIGHT_COMMAND, lambda t, m: _controller.mqtt_callback(t, m), fast=True)
     except Exception:
         pass
 
-def tick():
-    """Periodic work slice. Must return quickly.
 
-    Returns:
-        None
-    """
+def tick():
+    """Periodic work slice. Must return quickly."""
     global _controller
     if _controller:
         _controller.update_sensors()
-        # Periodic garbage collection to prevent memory leaks during long runtime
-        # Only run GC every 10 minutes to avoid performance impact
+        # Periodic garbage collection every 10 minutes
         current_time = time.ticks_ms()
         if not hasattr(_controller, '_last_gc_ms'):
             _controller._last_gc_ms = current_time
-        if time.ticks_diff(current_time, _controller._last_gc_ms) > 600000:  # 10 minutes
+        if time.ticks_diff(current_time, _controller._last_gc_ms) > 600000:
             try:
-                before_free = gc.mem_free()
                 gc.collect()
-                after_free = gc.mem_free()
-                _controller.log_info("memory", "Garbage collection completed", {
-                    "before_free": before_free,
-                    "after_free": after_free,
-                    "recovered": after_free - before_free
-                })
                 _controller._last_gc_ms = current_time
-            except Exception as e:
-                try:
-                    print(f"GC error: {e}")
-                except Exception:
-                    pass
+            except Exception:
+                pass
+
 
 def shutdown(reason=""):
-    """Best-effort quiesce before OTA/reset.
-
-    Args:
-        reason (str): Reason for shutdown (e.g., 'update').
-
-    Returns:
-        None
-    """
+    """Best-effort quiesce before OTA/reset."""
     global _runtime
     try:
         if _runtime:

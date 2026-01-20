@@ -1,6 +1,15 @@
 # Garage Controller Pinout
 
+## Overview
+
+The garage-controller Pico W controls the garage door, flood light, and monitors the chest freezer temperature:
+- **Door Relay (GP2)**: Activates garage door opener
+- **Reed Switches (GP3, GP4)**: Monitor door open/closed state
+- **Flood Light Relay (GP5)**: Controls exterior flood light
+- **DS18B20 (GP6)**: Freezer temperature monitoring (via CAT5 cable to chest freezer)
+
 ## Power
+
 - **USB Power**: Powers the Pico W via onboard USB port
 - **3V3**: 3.3V output for sensors
 - **GND**: Ground connections
@@ -12,147 +21,325 @@
 | GP2  | Output   | Garage Door Relay Control | HIGH = Activate relay |
 | GP3  | Input    | Garage Door Open Reed Switch | LOW when door is open, internal pull-up |
 | GP4  | Input    | Garage Door Closed Reed Switch | LOW when door is closed, internal pull-up |
-| GP5  | Output   | Flood Light Relay Control | HIGH = Lights on |
-| GP6  | I2C SDA  | BMP388 Temperature/Pressure Sensor | 3.3V logic |
-| GP7  | I2C SCL  | BMP388 Temperature/Pressure Sensor | 3.3V logic |
-| GP8  | 1-Wire   | DS18B20 Temperature Sensor | Requires 4.7kΩ pull-up |
+| GP5  | Output   | Flood Light Relay Control | Active-low (LOW = lights on) |
+| GP6  | 1-Wire   | DS18B20 Data | Freezer temperature (via CAT5), requires 4.7kΩ pull-up |
 | GP25 | Output   | Built-in LED | System status indicator |
 
 ## External Components
 
 ### Relays
-- **Garage Door Relay**: 
-  - Control: GP2
-  - Power: 5V from USB
-  - Common: Garage door button
-  - NO/NC: Connect to match existing button behavior
 
-- **Flood Light Relay**:
-  - Control: GP5
-  - Power: 5V from USB
-  - Connect to light switch wiring
+**Garage Door Relay:**
+- Control: GP2
+- Power: 5V from USB
+- Common: Garage door button
+- NO/NC: Connect to match existing button behavior
+- Logic: Active-high (HIGH = pulse relay)
 
-### Sensors
-- **BMP388**:
-  - VIN: 3.3V (power input)
-  - 3Vo: (not connected, this is the 3.3V output)
-  - GND: GND
-  - SCK: GP7 (SCL)
-  - SDO: GND (for I2C mode, pulls address low)        
-  - SDI: GP6 (SDA)
-  - CS: 3.3V (pulls high for I2C mode)
-  - INT: (not connected, unless you want to use interrupts)
-
-- **DS18B20**:
-  - Data: GP8
-  - VCC: 3.3V
-  - GND: GND
-  - 4.7kΩ pull-up between Data and 3.3V
+**Flood Light Relay:**
+- Control: GP5
+- Power: 5V from USB
+- Connect to light switch wiring
+- Logic: Active-low (LOW = lights on)
 
 ### Reed Switches
-- **Door Open**:
-  - GP3 to switch
-  - Switch to GND
-  - Internal pull-up enabled
-  - blue = common to gnd, white to gpio, black unused 
 
-- **Door Closed**:
-  - GP4 to switch
-  - Switch to GND
-  - Internal pull-up enabled
-  - blue = common to gnd, white to gpio, black unused 
+**Door Open Switch:**
+- GP3 to switch terminal
+- Other switch terminal to GND
+- Internal pull-up enabled
+- Wire colors: blue = common to GND, white to GPIO, black unused
+
+**Door Closed Switch:**
+- GP4 to switch terminal
+- Other switch terminal to GND
+- Internal pull-up enabled
+- Wire colors: blue = common to GND, white to GPIO, black unused
+
+### DS18B20 Temperature Sensor (Freezer - GP6)
+
+Monitors the chest freezer temperature via a CAT5 cable run from the garage controller to the freezer location.
+
+**Connections at Pico W:**
+| Signal | Connect To | Notes |
+|--------|------------|-------|
+| DATA | GP6 | 1-Wire data line |
+| VCC | 3V3 | 3.3V power |
+| GND | GND | Ground |
+| Pull-up | 4.7kΩ between GP6 and 3V3 | Required for 1-Wire |
+
+**Sensor End (at Freezer):**
+| Sensor Wire | Connect To | Notes |
+|-------------|------------|-------|
+| Red (VCC) | VCC from CAT5 | Power |
+| Black (GND) | GND from CAT5 | Ground |
+| Yellow/White (DATA) | DATA from CAT5 | 1-Wire data |
+
+**Placement:**
+- Place waterproof probe inside chest freezer
+- Route wire through bottom door gasket corner
+- Secure probe with zip tie to avoid contact with freezer walls
 
 ## Notes
+
 - All GPIOs are 3.3V logic level
 - Relays should be powered from 5V but controlled via 3.3V logic
-- Use appropriate current-limiting resistors for any indicator LEDs
 - Consider adding protection diodes for relay coils if not internally included
 
 ---
 
 ## Wiring Overview
 
-- **In-enclosure wiring (short leads, soldered)**:
-  - Garage Door Relay (GP2)
-  - Flood Light Relay (GP5)
+```
+GARAGE
+┌───────────────────────────────────────────────────────────┐
+│                                                            │
+│    ┌──────────────────────────────────────────────────┐   │
+│    │           Pico W (garage-controller)              │   │
+│    │                                                   │   │
+│    │  GP2 → Door Relay (to garage door opener)        │   │
+│    │  GP3 ← Door Open Reed Switch                     │   │
+│    │  GP4 ← Door Closed Reed Switch                   │   │
+│    │  GP5 → Flood Light Relay                         │   │
+│    │  GP6 ← DS18B20 freezer (via CAT5)               │   │
+│    │                                                   │   │
+│    └─────────────────────┬─────────────────────────────┘   │
+│                          │                                  │
+│                          │ CAT5 cable                       │
+│                          │                                  │
+└──────────────────────────┼──────────────────────────────────┘
+                           │
+                           ▼
+                ┌──────────────────────┐
+                │    Chest Freezer     │
+                │       DS18B20        │
+                │    (inside temp)     │
+                └──────────────────────┘
+```
 
-- **Two-conductor runs (to remote sensors)**:
-  - Garage Door Reed Switches (GP3, GP4 → switch → GND)
-  - Freezer Temperature Sensor (DS18B20 on GP8)
-    - Default design assumes 3-wire DS18B20 (VCC, GND, DATA with 4.7kΩ pull-up to 3V3).
-    - If you intend to run a 2-wire parasitic-power DS18B20, firmware changes and a strong pull-up are required. Please confirm before wiring.
+**In-enclosure wiring (short leads, soldered):**
+- Garage Door Relay (GP2)
+- Flood Light Relay (GP5)
+- 4.7kΩ pull-up resistor for DS18B20 (GP6 to 3V3)
 
-- **Multi-conductor run (weather station)**:
-  - CAT5 (T568B) cable from Pico to weather station enclosure for I2C sensor(s) and future expansion.
+**Two-conductor runs (to reed switches):**
+- Garage Door Reed Switches (GP3, GP4 → switch → GND)
 
-## Weather Station CAT5 Wiring (T568B)
+**CAT5 run (to freezer):**
+- DS18B20 Freezer Sensor (GP6, 3V3, GND)
 
-Purpose: carry power (3V3/GND) and I2C bus (SDA GP6, SCL GP7) to the BMP388 breakout in the weather enclosure, with one spare twisted pair reserved for future sensors.
+---
 
-Updated mapping to align with BMP388 pin order (left-to-right on breakout): `INT, CS, SDI(SDA), SDO(GND), SCK(SCL), GND, 3Vo, VIN`. Signals are arranged to minimize crossing in the tight enclosure while keeping I2C lines twisted with ground for integrity.
+## CAT5 Wiring - Reed Switches
 
-| RJ45 Pin | Wire Color (T568B) | Assignment | Notes |
-|---------:|---------------------|------------|-------|
-| 1 | White/Orange | INT (unused) | Leave unconnected at breakout |
-| 2 | Orange | CS → 3V3 | Tie CS to 3.3V for I2C mode |
-| 3 | White/Green | SDA (GP6) | I2C data |
-| 4 | Blue | SDO → GND | Strap SDO to GND (I2C addr 0x76) |
-| 5 | White/Blue | SCL (GP7) | I2C clock |
-| 6 | Green | GND | Sensor ground |
-| 7 | White/Brown | 3Vo (unused) | Leave unconnected |
-| 8 | Brown | VIN → 3V3 | 3.3V power input to breakout |
-
-Notes:
-- SDA (pin 3) is twisted with GND (pin 6) on the green pair (3/6), and SCL (pin 5) is twisted with GND (pin 4) on the blue pair (4/5). This preserves tight return paths for the I2C signals to reduce noise and crosstalk in the harness.
-- CS is held high (to 3.3V) and SDO is grounded at the breakout to force I2C mode and select address 0x76.
-- INT and 3Vo are not used; cap them neatly to avoid stray whiskers.
-- Power budget: with VIN (3.3V) on pin 8 and grounds on pins 4 and 6, return current has short paths, though VIN is paired with 3Vo rather than a ground due to the pin-order constraint. For short runs this is fine.
-- If you observe power noise on longer runs, consider this alternative swap to make a true power/ground pair at the expense of a slight crossover at the header: swap 7↔6 at the RJ45 (making 7=GND, 6=3Vo/unused). That yields 7–8 = GND+3V3 as a twisted power pair while keeping SDA (3) paired to GND (now on 6). Re-check the physical header routing before committing.
-- Keep I2C speed conservative (≤100 kHz) for longer CAT5 runs. Ensure pull-ups are present on the breakout (often 10k). If edges look soft, strengthen pull-ups to ~4.7k.
-
-Twisted-pair optimization summary (after update): 3–6 (green) = SDA+GND, 4–5 (blue) = GND+SCL, 1–2 (orange) = INT+CS, 7–8 (brown) = 3Vo+VIN.
-
-## CAT5 Wiring - DS18B20 and Reed Switches
+If using CAT5 cable to route reed switch connections:
 
 ### Pico W End (RJ45)
-| RJ45 Pin | Wire Color (T568B) | Pico W Connection | Description           |
-|----------|-------------------|-------------------|-----------------------|
-| 1        | White/Orange     | GP8              | DS18B20 Data          |
-| 2        | Orange           | 3.3V             | Power for DS18B20     |
-| 3        | White/Green      | GP3              | Door Open Reed Switch |
-| 4        | Blue             | GP4              | Door Closed Reed Switch |
-| 5        | White/Blue       | -                | Not connected         |
-| 6        | Green            | -                | Not connected         |
-| 7        | White/Brown      | GND              | Ground for all sensors|
-| 8        | Brown            | -                | Not connected         |
+
+| RJ45 Pin | Wire Color (T568B) | Pico W Connection | Description |
+|----------|-------------------|-------------------|-------------|
+| 3 | White/Green | GP3 | Door Open Reed Switch |
+| 4 | Blue | GP4 | Door Closed Reed Switch |
+| 7 | White/Brown | GND | Ground for switches |
 
 ### Sensor End
-#### DS18B20 Temperature Sensor
-- **Red (VCC)**: Connect to Orange (Pin 2)
-- **Yellow (DATA)**: Connect to White/Orange (Pin 1)
-- **Black (GND)**: Connect to White/Brown (Pin 7)
-- **4.7kΩ Resistor**: Between Orange (Pin 2) and White/Orange (Pin 1)
 
-#### Door Open Reed Switch
-- **One side**: Connect to White/Green (Pin 3)
-- **Other side**: Connect to White/Brown (Pin 7, GND)
+**Door Open Reed Switch:**
+- One side: Connect to White/Green (Pin 3)
+- Other side: Connect to White/Brown (Pin 7, GND)
 
-#### Door Closed Reed Switch
-- **One side**: Connect to Blue (Pin 4)
-- **Other side**: Connect to White/Brown (Pin 7, GND)
+**Door Closed Reed Switch:**
+- One side: Connect to Blue (Pin 4)
+- Other side: Connect to White/Brown (Pin 7, GND)
 
-### Notes:
-1. The DS18B20 requires a 4.7kΩ pull-up resistor between the data line and 3.3V.
-2. The reed switches are normally open and will close when near a magnet.
-3. The internal pull-up resistors on GP3 and GP4 will be enabled in software.
-4. The unused pairs (pins 5,6,8) are left for future expansion.
-5. Keep the sensor cable run as short as possible for best results with the DS18B20.
-6. All ground connections (White/Brown) should be tied together at the sensor end.
+### Notes
 
-### Twisted-Pair Usage
-- **Pair 1 (Orange)**: DS18B20 Data + 3.3V (with pull-up resistor)
-- **Pair 2 (Green)**: Door Open Reed Switch + unused
-- **Pair 3 (Blue)**: Door Closed Reed Switch + unused
-- **Pair 4 (Brown)**: GND + unused
+1. Reed switches are normally open and close when near a magnet
+2. Internal pull-up resistors on GP3 and GP4 are enabled in software
+3. All ground connections (White/Brown) should be tied together at the sensor end
 
-This wiring maintains signal integrity by keeping signal pairs twisted and provides proper power distribution.
+---
+
+## CAT5 Wiring - Freezer DS18B20
+
+The DS18B20 only needs 3 wires, so CAT5 is overkill but works well for the run to the chest freezer.
+
+### Recommended Wire Assignments (T568B Colors)
+
+| Signal | Wire Color | Notes |
+|--------|------------|-------|
+| DATA | White/Blue | To GP6 |
+| VCC | White/Brown | To 3V3 |
+| GND | Blue + Brown | Tie together for lower impedance |
+
+### Pico W End
+
+```
+3V3 (Pin 36) ────────────────── White/Brown
+GND ─────────────────────────── Blue + Brown (both tied together)
+GP6 (DS18B20 data) ──────────── White/Blue
+
+Pull-up resistor: 4.7kΩ between White/Blue and 3V3
+```
+
+### Freezer End
+
+```
+DS18B20 Red (VCC) ────────────── White/Brown
+DS18B20 Black (GND) ──────────── Blue + Brown (both tied together)
+DS18B20 Yellow/White (DATA) ──── White/Blue
+```
+
+### Cable Length Guidelines
+
+| Length | Expected Result |
+|--------|-----------------|
+| Under 3 meters | No issues with 4.7kΩ pull-up |
+| 3-10 meters | Should work fine, may use 2.7kΩ pull-up if issues |
+| 10+ meters | Consider stronger pull-up (2.2kΩ) or slew rate limiting |
+
+### Important Notes
+
+1. **4.7kΩ pull-up must be at the Pico W end** (between GP6 and 3V3)
+2. **Tie both ground wires together** at each end for low impedance
+3. **Keep away from high-current AC wiring** to minimize interference
+4. **Route cable away from sources of electrical noise** (motors, compressors)
+5. **Unused CAT5 pairs can be left disconnected** or tied to ground for shielding
+
+---
+
+## MQTT Topics Reference
+
+### Door Control
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `home/garage/door/status` | Publish | Door state: open/closed/opening/closing/error |
+| `home/garage/door/command` | Subscribe | Commands: open/close/toggle |
+
+### Light Control
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `home/garage/light/status` | Publish | Light state: on/off |
+| `home/garage/light/command` | Subscribe | Commands: on/off/toggle |
+
+### Freezer Temperature
+
+| Topic | Direction | Description | Format |
+|-------|-----------|-------------|--------|
+| `home/garage-controller/freezer/temperature` | Publish | Freezer temperature | Float string, °F (e.g., "-5.2") |
+
+### Status
+
+| Topic | Description |
+|-------|-------------|
+| `home/garage-controller/status` | Consolidated status (every 30s) |
+| `home/system/garage-controller/health` | LWT: offline when disconnected |
+| `home/system/garage-controller/sos` | Critical errors |
+
+### Consolidated Status Payload
+
+**Topic:** `home/garage-controller/status`
+
+**Payload:**
+```json
+{
+  "timestamp": 1703789400000,
+  "uptime_s": 3600,
+  "health": "online",
+  "door": {
+    "state": "closed",
+    "open_switch": false,
+    "closed_switch": true
+  },
+  "light": {
+    "state": "off"
+  },
+  "freezer": {
+    "temperature_f": -5.2
+  },
+  "errors": [],
+  "memory": {
+    "free": 150000,
+    "allocated": 50000
+  }
+}
+```
+
+---
+
+## Troubleshooting
+
+### Door State Issues
+
+1. **Always shows "error"**: Both reed switches activated simultaneously - check alignment
+2. **Stuck in "opening"/"closing"**: Door stopped mid-travel or reed switch misaligned
+3. **Wrong state**: Verify switch is normally-open and closes when magnet approaches
+
+### Relay Issues
+
+1. **Door doesn't respond**: Check relay wiring, verify 500ms pulse is sufficient
+2. **Light won't turn on**: Check active-low configuration, verify relay clicks
+3. **Intermittent operation**: Check relay coil power supply, add flyback diode
+
+### DS18B20 Not Found (Freezer)
+
+1. Check CAT5 wiring at both ends matches the pinout above
+2. Verify 4.7kΩ pull-up is installed between GP6 and 3V3 at Pico W end
+3. Check device logs for "DS18B20 freezer initialized" message
+4. Test continuity of CAT5 cable (especially DATA line)
+5. Check for cold solder joints or loose connections at both ends
+
+### DS18B20 Temperature Reading Errors
+
+1. **CRC errors**: Check wiring, may need stronger pull-up for long cable
+2. **Always reads 85°C/185°F**: Conversion not complete (timing issue)
+3. **Wildly wrong values**: Pull-up resistor missing or wrong value
+4. **Intermittent readings**: Check cable connections, may have noise pickup
+5. **Try a stronger pull-up**: For long runs, try 2.7kΩ or 2.2kΩ instead of 4.7kΩ
+
+### Cable Run Issues
+
+1. **Sensor works on short cable but not CAT5**: Likely pull-up too weak for cable capacitance
+2. **Readings are noisy**: Route cable away from AC power lines
+3. **Sensor stops working randomly**: Check for intermittent connection at crimp or splice
+
+---
+
+## Verification Checklist
+
+### Pre-Installation (Bench Test)
+
+- [ ] Door relay clicks when GP2 goes HIGH
+- [ ] Door open reed switch (GP3) reads LOW when magnet present
+- [ ] Door closed reed switch (GP4) reads LOW when magnet present
+- [ ] Flood light relay activates when GP5 goes LOW
+- [ ] DS18B20 freezer (GP6) detected on 1-Wire bus
+- [ ] DS18B20 freezer temperature reads correctly at room temperature
+- [ ] 4.7kΩ pull-up resistor installed on GP6
+- [ ] WiFi connects successfully
+- [ ] MQTT publishes to correct topics
+
+### Post-Installation
+
+- [ ] Door state changes correctly as door moves
+- [ ] Door commands work via MQTT
+- [ ] Flood light toggles correctly
+- [ ] DS18B20 freezer reads correct freezer temperature
+- [ ] CAT5 cable to freezer is secured and routed safely
+- [ ] All MQTT topics publishing correctly
+- [ ] Status publishing every 30 seconds
+
+---
+
+## Parts Reference
+
+| Component | Example Part | Notes |
+|-----------|--------------|-------|
+| Garage Door Relay | SRD-05VDC-SL-C | 5V coil, 10A contacts |
+| Flood Light Relay | SRD-05VDC-SL-C | 5V coil, match load |
+| Reed Switch | Generic NO reed | 2-wire magnetic switch |
+| DS18B20 Waterproof | HiLetgo DS18B20 Kit | Waterproof probe for freezer |
+| 4.7kΩ Resistor | 1/4W through-hole | Pull-up for DS18B20 (GP6) |
+| CAT5/CAT5e Cable | Any solid-core CAT5 | For freezer sensor run |

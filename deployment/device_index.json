@@ -4,13 +4,19 @@
       "device_id": "garage-controller",
       "config": "devices/garage-controller.json",
       "location": "Garage",
-      "notes": "Garage door + lights + weather + freezer"
+      "notes": "Garage door + lights"
     },
     {
       "device_id": "house-monitor",
       "config": "devices/house-monitor.json",
       "location": "Kitchen Freezer",
       "notes": "DS18B20 + door reed"
+    },
+    {
+      "device_id": "weather-station",
+      "config": "devices/weather-station.json",
+      "location": "Garage exterior wall",
+      "notes": "BMP388 weather + freezer DS18B20"
     }
   ]
 }
