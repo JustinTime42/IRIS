@@ -86,6 +86,7 @@ This is the central server for the IRIS (Intelligent Residence Information Syste
 
 ```
 server/
+
 ├── api/                   # FastAPI application
 │   └── main.py           # Main application entry point
 ├── mosquitto/            # MQTT broker configuration
