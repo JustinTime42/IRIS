@@ -10,15 +10,18 @@ This is the central server for the IRIS (Intelligent Residence Information Syste
 ## Setup
 
 1. Copy the example environment file:
+
    ```bash
    cp .env.example .env
    ```
 
 2. Update the `.env` file with your configuration:
+
    - Set secure passwords for MQTT and PostgreSQL
    - Adjust other settings as needed
 
 3. Create required directories:
+
    ```bash
    mkdir -p mosquitto/{config,data,log}
    mkdir -p logs
@@ -32,16 +35,19 @@ This is the central server for the IRIS (Intelligent Residence Information Syste
 ## Services
 
 - **API Server**: http://localhost:8000
+
   - API Documentation: http://localhost:8000/docs
   - Health Check: http://localhost:8000/health
   - DB Health: http://localhost:8000/db/health
 
 - **MQTT Broker**:
+
   - Host: `localhost`
   - Port: `1883`
   - WebSocket: `ws://localhost:9001`
 
 - **Database**:
+
   - Host: `localhost`
   - Port: `5432`
   - Database: `iris`
@@ -53,17 +59,20 @@ This is the central server for the IRIS (Intelligent Residence Information Syste
 ## Development
 
 1. Create and activate a virtual environment:
+
    ```bash
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    ```
 
 2. Install dependencies:
+
    ```bash
    pip install -r requirements.txt
    ```
 
 3. Run the development server:
+
    ```bash
    uvicorn api.main:app --reload
    ```
