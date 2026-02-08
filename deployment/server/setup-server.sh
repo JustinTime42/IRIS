@@ -88,34 +88,28 @@ echo "  Starting Corvids Nest Deployment"
 echo "═══════════════════════════════════════════════"
 echo ""
 
-cd /opt/corvids-nest
+# Stop services first to release file locks (e.g. mosquitto.conf)
+echo "[1/3] Stopping services..."
+cd /opt/corvids-nest/server && docker compose down
 
-# Force checkout to update working directory
-echo "[1/4] Updating code..."
-git reset --hard HEAD
-
-# Navigate to server directory
-cd server
+# Update code — safe now that services are stopped
+echo "[2/3] Updating code..."
+cd /opt/corvids-nest && git reset --hard HEAD
 
 # Check if .env exists
-if [ ! -f .env ]; then
-    echo "WARNING: .env file not found! Please create it before starting services."
+if [ ! -f server/.env ]; then
+    echo "WARNING: server/.env file not found! Please create it before starting services."
     exit 1
 fi
 
-# Stop services
-echo "[2/4] Stopping services..."
-docker compose down
-
 # Build and start services
-echo "[3/4] Building and starting services..."
-docker compose up -d --build
+echo "[3/3] Building and starting services..."
+cd /opt/corvids-nest/server && docker compose up -d --build
 
 # Wait a moment for services to start
 sleep 3
 
 # Check status
-echo "[4/4] Checking service status..."
 docker compose ps
 
 echo ""
