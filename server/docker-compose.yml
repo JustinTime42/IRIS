@@ -14,10 +14,9 @@ services:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
-    command: /bin/sh -c "echo '${MQTT_USERNAME}:${MQTT_PASSWORD}' > /mosquitto/config/passwd && \
-      mosquitto_passwd -U /mosquitto/config/passwd && \
-      chmod 600 /mosquitto/config/passwd && \
-      chown 1883:1883 /mosquitto/config/passwd && \
+    command: /bin/sh -c "echo '${MQTT_USERNAME}:${MQTT_PASSWORD}' > /mosquitto/data/passwd && \
+      mosquitto_passwd -U /mosquitto/data/passwd && \
+      chmod 600 /mosquitto/data/passwd && \
       /docker-entrypoint.sh /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
     env_file:
       - .env
