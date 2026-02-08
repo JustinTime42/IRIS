@@ -250,8 +250,6 @@ Add to your PowerShell profile (`$PROFILE`):
 # Quick access to corvids-nest
 function cn { Set-Location C:\Users\justi\Code\corvids-nest }
 
-
-
 # Quick deploy
 function deploy {
     cn
