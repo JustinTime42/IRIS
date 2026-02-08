@@ -10,7 +10,10 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(tree:*)",
       "Bash(cat:*)",
-      "Bash(.gradlew.bat assembleDebug:*)"
+      "Bash(.gradlew.bat assembleDebug:*)",
+      "Bash(powershell -Command \"cd 'C:\\\\Users\\\\justi\\\\Code\\\\corvids-nest\\\\android\\\\app\\\\android'; .\\\\gradlew.bat :app:generateCodegenSchemaFromJavaScript --stacktrace 2>&1\":*)",
+      "Bash(powershell -Command \"cd ''C:\\\\Users\\\\justi\\\\Code\\\\corvids-nest\\\\android\\\\app\\\\android''; Remove-Item -Recurse -Force .gradle -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force app\\\\build -ErrorAction SilentlyContinue; .\\\\gradlew.bat assembleDebug --refresh-dependencies 2>&1 | Select-Object -Last 80\")",
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": []

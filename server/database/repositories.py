@@ -196,10 +196,10 @@ async def get_weather_history(
         """
         SELECT
             date_trunc(:bucket, recorded_at) AS ts,
-            AVG(value_float) FILTER (WHERE metric = 'garage_temperature_f') AS temperature_f,
-            AVG(value_float) FILTER (WHERE metric = 'garage_pressure_inhg') AS pressure_inhg
+            AVG(value_float) FILTER (WHERE metric = 'weather_temperature_f') AS temperature_f,
+            AVG(value_float) FILTER (WHERE metric = 'weather_pressure_inhg') AS pressure_inhg
         FROM sensor_readings
-        WHERE metric IN ('garage_temperature_f', 'garage_pressure_inhg')
+        WHERE metric IN ('weather_temperature_f', 'weather_pressure_inhg')
           AND recorded_at >= :start
           AND recorded_at < :end
         GROUP BY ts
