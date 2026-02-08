@@ -82,6 +82,7 @@ mkdir -p .git/hooks
 cat > .git/hooks/post-receive << 'HOOK_EOF'
 #!/bin/bash
 set -e
+unset GIT_DIR
 
 echo "═══════════════════════════════════════════════"
 echo "  Starting Corvids Nest Deployment"
