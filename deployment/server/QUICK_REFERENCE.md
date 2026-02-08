@@ -5,11 +5,13 @@
 ### On Linux Server
 
 1. Copy `setup-server.sh` to the server:
+
    ```powershell
    scp deployment\server\setup-server.sh justin@<server-ip>:~/
    ```
 
 2. SSH to server and run setup:
+
    ```bash
    ssh justin@<server-ip>
    chmod +x ~/setup-server.sh
@@ -24,6 +26,7 @@
 ### On Windows Desktop
 
 1. Add production remote:
+
    ```powershell
    cd C:\Users\justi\Code\corvids-nest
    git remote add production justin@<server-ip>:/opt/corvids-nest/.git
@@ -44,6 +47,7 @@ cd C:\Users\justi\Code\corvids-nest
 ```
 
 This will:
+
 - Show uncommitted changes
 - Ask to commit them
 - Push to server
@@ -246,29 +250,32 @@ Add to your PowerShell profile (`$PROFILE`):
 # Quick access to corvids-nest
 function cn { Set-Location C:\Users\justi\Code\corvids-nest }
 
+
+
 # Quick deploy
-function deploy { 
+function deploy {
     cn
     .\deployment\server\deploy.ps1 @args
 }
 
 # View server logs
-function server-logs { 
+function server-logs {
     ssh justin@<server-ip> "cd /opt/corvids-nest/server && docker compose logs -f $args"
 }
 
 # SSH to server
-function server { 
+function server {
     ssh justin@<server-ip>
 }
 
 # Check server status
-function server-status { 
+function server-status {
     ssh justin@<server-ip> "cd /opt/corvids-nest/server && docker compose ps"
 }
 ```
 
 Usage:
+
 ```powershell
 cn                          # cd to project
 deploy                      # Deploy
@@ -316,6 +323,7 @@ GITHUB_DEFAULT_REF=main
 ```
 
 Generate secure passwords:
+
 ```powershell
 # Random password
 -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | % {[char]$_})
