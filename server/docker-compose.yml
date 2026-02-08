@@ -5,6 +5,7 @@ services:
   mqtt:
     image: eclipse-mosquitto:2.0
     container_name: iris-mqtt
+    user: "1883:1883"
     restart: unless-stopped
     ports:
       - "1883:1883"  # MQTT
@@ -15,8 +16,8 @@ services:
       - ./mosquitto/log:/mosquitto/log
     command: /bin/sh -c "echo '${MQTT_USERNAME}:${MQTT_PASSWORD}' > /mosquitto/config/passwd && \
       mosquitto_passwd -U /mosquitto/config/passwd && \
-      chmod 700 /mosquitto/config/passwd && \
-      chown root:root /mosquitto/config/passwd && \
+      chmod 600 /mosquitto/config/passwd && \
+      chown 1883:1883 /mosquitto/config/passwd && \
       /docker-entrypoint.sh /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
     env_file:
       - .env

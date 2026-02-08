@@ -256,7 +256,7 @@ function deploy {
     .\deployment\server\deploy.ps1 @args
 }
 
-# View server log
+# View server logs
 function server-logs {
     ssh justin@<server-ip> "cd /opt/corvids-nest/server && docker compose logs -f $args"
 }
